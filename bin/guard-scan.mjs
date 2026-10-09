@@ -25,7 +25,46 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     ...[...body.matchAll(/\bports\s*=\s*\[([^\]]*)\]/g)].flatMap((m) => [...(m[1] ?? "").matchAll(/\d+/g)].map((n) => Number(n[0])))
   ];
   return ports.length === 0 ? void 0 : ports;
-}, isReference = (name, value) => /_(FILE|PATH|DIR|URL|URI|ENDPOINT|NAME|ID|ARN|REF|VERSION|LENGTH|POLICY|TYPE|ROTATION|TTL|MODE|ALGORITHM|COUNT|HEADER)$/i.test(name) || /^["']?(\$\{?[\w.]+\}?|[a-z][\w+.-]*:\/\/\S*|\.{0,2}\/\S*|\d+|true|false|yes|no|on|off)["']?$/i.test(value.trim()), FULL_SHA = /^[0-9a-f]{40}$/, INJECTABLE = /\$\{\{\s*(github\.head_ref|github\.event\.(issue|pull_request|comment|review|review_comment|discussion|discussion_comment|head_commit|commits|pages)\b[^}]*\.(title|body|head_ref|ref|label|name|email|message|page_name|default_branch))\s*\}\}/, SECRET_NAME = /(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)/i, isComment = (line) => /^\s*#/.test(line), isPublicInvoker = (line, ctx) => /"allUsers"/.test(line) && ctx.lines.slice(Math.max(0, ctx.index - 4), ctx.index + 5).some((l) => /roles\/(run|cloudfunctions)\.invoker/.test(l)), RULES = [
+}, isReference = (name, value) => /_(FILE|PATH|DIR|URL|URI|ENDPOINT|NAME|ID|ARN|REF|VERSION|LENGTH|POLICY|TYPE|ROTATION|TTL|MODE|ALGORITHM|COUNT|HEADER)$/i.test(name) || /^["']?(\$\{?[\w.]+\}?|[a-z][\w+.-]*:\/\/\S*|\.{0,2}\/\S*|\d+|true|false|yes|no|on|off)["']?$/i.test(value.trim()), FULL_SHA = /^[0-9a-f]{40}$/, INJECTABLE = /\$\{\{\s*(github\.head_ref|github\.event\.(issue|pull_request|comment|review|review_comment|discussion|discussion_comment|head_commit|commits|pages)\b[^}]*\.(title|body|head_ref|ref|label|name|email|message|page_name|default_branch))\s*\}\}/, SECRET_NAME = /(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)/i, isComment = (line) => /^\s*#/.test(line), PIPE_TO_SHELL = /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b/, isUnpinnedImage = (image) => {
+  if (image === void 0 || image.includes("@sha256:") || image.includes("{{") || image.includes("$"))
+    return !1;
+  let tag = image.split("/").pop().split(":")[1];
+  return tag === void 0 || tag === "latest";
+}, nearestKey = (lines, index, keys) => {
+  for (let i = index;i >= 0; i--) {
+    let m = keys.exec(lines[i] ?? "");
+    if (m)
+      return m[1];
+  }
+  return;
+}, LAUNCHERS = {
+  npx: (args) => args.find((a) => !a.startsWith("-")),
+  bunx: (args) => args.find((a) => !a.startsWith("-")),
+  pnpm: (args) => args[0] === "dlx" ? args.slice(1).find((a) => !a.startsWith("-")) : void 0,
+  uvx: (args) => args.find((a) => !a.startsWith("-")),
+  pipx: (args) => args[0] === "run" ? args.slice(1).find((a) => !a.startsWith("-")) : void 0
+}, isPinnedPackage = (launcher, pkg) => launcher === "uvx" || launcher === "pipx" ? /==|@\d/.test(pkg) : /^(@[^/]+\/)?[^@]+@\d[\w.+-]*$/.test(pkg) || pkg.startsWith(".") || pkg.startsWith("/"), unpinnedServers = (text) => {
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  let found = [], walk = (node) => {
+    if (Array.isArray(node))
+      return node.forEach(walk);
+    if (node === null || typeof node !== "object")
+      return;
+    let { command, args } = node;
+    if (typeof command === "string" && Array.isArray(args)) {
+      let launcher = command.split(/[\\/]/).pop() ?? "", pkg = LAUNCHERS[launcher]?.(args.filter((a) => typeof a === "string"));
+      if (pkg !== void 0 && !isPinnedPackage(launcher, pkg))
+        found.push(pkg);
+    }
+    Object.values(node).forEach(walk);
+  };
+  return walk(json), found;
+}, TROJAN = /[\u202A-\u202E\u2066-\u2069]|\uDB40[\uDC00-\uDC7F]/, INVISIBLE = /[\u200B\u200C\u2060\u180E]|(?!^)\uFEFF/, INJECTION = /\b(ignore|disregard|forget)\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions|rules|prompts?)\b|\bdo\s+not\s+(tell|inform|show|mention\s+(this|it)\s+to)\s+the\s+user\b|\b(disable|turn\s+off|bypass|skip)\s+(the\s+)?(shift-left-guard|guard|hooks|sandbox|permission\s+(checks|prompts))\b|--dangerously-skip-permissions/i, isPublicInvoker = (line, ctx) => /"allUsers"/.test(line) && ctx.lines.slice(Math.max(0, ctx.index - 4), ctx.index + 5).some((l) => /roles\/(run|cloudfunctions)\.invoker/.test(l)), RULES = [
   {
     id: "GHA001",
     kind: "workflow",
@@ -164,7 +203,7 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     severity: "medium",
     title: "Remote script piped into a shell",
     fix: "Download to a file, verify its checksum or signature, then run it.",
-    line: (line) => /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b/.test(line)
+    line: (line) => PIPE_TO_SHELL.test(line)
   },
   {
     id: "TF001",
@@ -263,12 +302,160 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     severity: "low",
     title: "Image not pinned (:latest or no tag)",
     fix: "Pin an explicit version tag or digest so rollouts are reproducible.",
+    line: (line) => isUnpinnedImage(/^\s*-?\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1])
+  },
+  {
+    id: "CMP001",
+    kind: "compose",
+    severity: "high",
+    title: "Privileged container",
+    fix: "Remove `privileged: true`; add only the capabilities the service needs with `cap_add:`.",
+    line: (line) => /^\s*privileged:\s*true\b/.test(line)
+  },
+  {
+    id: "CMP002",
+    kind: "compose",
+    severity: "critical",
+    title: "Docker socket mounted into a container",
+    fix: "Do not mount `/var/run/docker.sock`: it is root on the host. Use a socket proxy with a read-only allow-list (e.g. tecnativa/docker-socket-proxy) if the service must talk to Docker.",
+    line: (line) => !isComment(line) && /docker\.sock/.test(line)
+  },
+  {
+    id: "CMP003",
+    kind: "compose",
+    severity: "medium",
+    title: "Host namespace shared with the container",
+    fix: "Drop `network_mode: host`, `pid: host` and `ipc: host`; publish only the ports you need with `ports:`.",
+    line: (line) => /^\s*(network_mode|pid|ipc):\s*['"]?host\b/.test(line)
+  },
+  {
+    id: "CMP004",
+    kind: "compose",
+    severity: "high",
+    title: "Secret written into the compose file",
+    fix: "Read it from the environment (`PASSWORD: ${DB_PASSWORD}` with a git-ignored `.env`) or use Compose `secrets:`.",
     line: (line) => {
-      let image = /^\s*-?\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1];
-      if (image === void 0 || image.includes("@sha256:") || image.includes("{{"))
+      let m = /^\s*-?\s*['"]?(\w+)['"]?\s*[=:]\s*['"]?([^'"#\s][^'"#]*)['"]?\s*$/.exec(line), [name, value] = [m?.[1] ?? "", m?.[2]?.trim() ?? ""];
+      return SECRET_NAME.test(name) && value.length >= 4 && !value.includes("${") && !isReference(name, value);
+    }
+  },
+  {
+    id: "CMP005",
+    kind: "compose",
+    severity: "low",
+    title: "Image not pinned (:latest or no tag)",
+    fix: "Pin an explicit version tag or digest so every `docker compose up` runs the same image.",
+    line: (line) => isUnpinnedImage(/^\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1])
+  },
+  {
+    id: "NPM001",
+    kind: "npm",
+    severity: "high",
+    title: "Install script downloads or runs remote code",
+    fix: "Install scripts run on every `npm install` of every user. Do not fetch or eval code there; ship the code in the package or make it an explicit, documented step.",
+    line: (line) => {
+      let m = /"(preinstall|install|postinstall|prepare)"\s*:\s*"([^"]*)"/.exec(line);
+      return m !== null && /\b(curl|wget)\b|\|\s*(ba|z)?sh\b|\bnode\s+-e\b|base64\s+(-d|--decode)|\beval\b/.test(m[2] ?? "");
+    }
+  },
+  {
+    id: "NPM002",
+    kind: "npm",
+    severity: "medium",
+    title: "Dependency installed from a git or HTTP URL",
+    fix: "Depend on a published version from the registry. If you must use git, pin a full commit SHA (`github:org/repo#<sha>`) and review it like vendored code.",
+    line: (line) => {
+      let m = /^\s*"([^"]+)"\s*:\s*"((?:git\+|git:|github:|gitlab:|bitbucket:|https?:\/\/)[^"]*)"/.exec(line);
+      if (m === null || /^(url|homepage|repository|bugs|funding|\$schema|registry)$/.test(m[1] ?? ""))
         return !1;
-      let tag = image.split("/").pop().split(":")[1];
-      return tag === void 0 || tag === "latest";
+      return !/#[0-9a-f]{40}$/.test(m[2] ?? "");
+    }
+  },
+  {
+    id: "NPM003",
+    kind: "npm",
+    severity: "low",
+    title: "Dependency on any version (* or latest)",
+    fix: "Use a semver range (`^1.4.0`) and commit the lockfile, so installs are reproducible.",
+    line: (line) => /^\s*"[^"]+"\s*:\s*"(\*|latest|x)"\s*,?\s*$/.test(line)
+  },
+  {
+    id: "AGT001",
+    kind: "agent",
+    severity: "high",
+    title: "Agent may run any shell command without asking",
+    fix: "Allow narrow commands (`Bash(npm test)`, `Bash(git status:*)`) instead of `Bash`, `Bash(*)` or `*`, and do not set `defaultMode: bypassPermissions` in a shared settings file.",
+    line: (line, ctx) => {
+      if (/"defaultMode"\s*:\s*"bypassPermissions"/.test(line))
+        return !0;
+      return /"(Bash|Bash\(\s*\*?\s*(:\s*\*)?\s*\)|\*)"/.test(line) && nearestKey(ctx.lines, ctx.index, /"(allow|deny|ask)"\s*:/) === "allow";
+    }
+  },
+  {
+    id: "AGT002",
+    kind: "agent",
+    severity: "medium",
+    title: "Agent safeguards switched off",
+    fix: "`disableAllHooks` stops every hook and mod, guards included; `enableAllProjectMcpServers` starts any MCP server a repository brings. Leave both off in shared settings and approve servers one by one.",
+    line: (line) => /"(disableAllHooks|enableAllProjectMcpServers)"\s*:\s*true/.test(line)
+  },
+  {
+    id: "AGT003",
+    kind: "agent",
+    severity: "medium",
+    title: "MCP server package not pinned",
+    fix: 'Pin the version the server runs (`"args": ["-y", "@org/server@1.4.2"]`, `uvx pkg==1.4.2`). Unpinned, every start runs whatever was published last, with your credentials.',
+    file: (lines) => {
+      let pkgs = unpinnedServers(lines.join(`
+`));
+      return pkgs.length === 0 ? -1 : lines.findIndex((l) => l.includes(`"${pkgs[0]}"`));
+    }
+  },
+  {
+    id: "AGT004",
+    kind: "agent",
+    severity: "high",
+    title: "Credential written into agent configuration",
+    fix: 'Reference an environment variable (`"Authorization": "Bearer ${GITHUB_TOKEN}"`, `"env": { "API_KEY": "${API_KEY}" }`) so the secret never lands in the repository.',
+    line: (line) => {
+      let m = /"(\w*(?:TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_?KEY)\w*|Authorization|X-Api-Key)"\s*:\s*"([^"]{8,})"/i.exec(line), [name, value] = [m?.[1] ?? "", m?.[2] ?? ""];
+      return m !== null && !value.includes("${") && !/^Bearer\s+\$/.test(value) && !isReference(name, value);
+    }
+  },
+  {
+    id: "AGT007",
+    kind: "agent",
+    severity: "high",
+    title: "Hook command runs a remote script",
+    fix: "A hook runs on every matching event with your permissions. Keep the script in the repository and run it from there instead of piping a download into a shell.",
+    line: (line) => /"command"\s*:/.test(line) && PIPE_TO_SHELL.test(line)
+  },
+  {
+    id: "AGT005",
+    kind: "instructions",
+    severity: "high",
+    title: "Invisible characters in an agent instruction file",
+    fix: "Remove zero-width characters: they hide text from reviewers that the model still reads. Retype the line if you cannot see where they are.",
+    line: (line) => INVISIBLE.test(line)
+  },
+  {
+    id: "AGT006",
+    kind: "instructions",
+    severity: "high",
+    title: "Instruction file tells the agent to override its rules or run remote code",
+    fix: "Instruction files are prompts every session follows. Remove text that overrides earlier instructions, hides actions from the user, switches off safeguards or pipes downloads into a shell.",
+    line: (line) => INJECTION.test(line) || PIPE_TO_SHELL.test(line)
+  },
+  {
+    id: "AGT008",
+    kind: "guard",
+    severity: "high",
+    title: "Repository config switches off guard rules",
+    fix: "Disabling a rule turns it off for everyone in this repository. Agree on it with your team first, or silence single lines with `# guard:ignore <ID>`.",
+    line: (line) => /"disable"\s*:\s*\[\s*"/.test(line),
+    file: (lines) => {
+      let start = lines.findIndex((l) => /"disable"\s*:\s*\[\s*$/.test(l));
+      return start >= 0 && /^\s*"/.test(lines[start + 1] ?? "") ? start : -1;
     }
   },
   {
@@ -292,8 +479,29 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     title: "Cloud or SaaS credential",
     fix: "Remove it, rotate it now, and read it from an environment variable or secret manager instead.",
     line: (line) => !/EXAMPLE|example|xxxx|XXXX|<[^>]+>/.test(line) && /\b(AKIA|ASIA)[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bgh[pousr]_[0-9A-Za-z]{36}\b|\bgithub_pat_[0-9A-Za-z_]{60,}\b|\bxox[baprs]-[0-9A-Za-z-]{10,}\b|\bsk_live_[0-9A-Za-z]{20,}\b|\bsk-ant-[0-9A-Za-z_-]{20,}\b|\bsk-proj-[0-9A-Za-z_-]{20,}\b|\bglpat-[0-9A-Za-z_-]{20}\b/.test(line)
+  },
+  {
+    id: "SEC003",
+    kind: "any",
+    severity: "high",
+    title: "Hidden bidirectional or tag characters (Trojan Source)",
+    fix: "Remove the invisible Unicode controls: they make code or prompts read differently than they run (CVE-2021-42574). Retype the line.",
+    line: (line) => TROJAN.test(line)
+  },
+  {
+    id: "SEC004",
+    kind: "any",
+    severity: "high",
+    title: "Environment file not ignored by git",
+    fix: "Add it to `.gitignore` (e.g. `.env*` with `!.env.example`) before it is committed, and keep only placeholders in a checked-in `.env.example`."
   }
-], base = (path) => path.split(/[\\/]/).pop() ?? path, classify = (path, text) => {
+], isEnvFile = (path) => {
+  let name = base(path);
+  return /^\.env(\..+)?$|\.env$/.test(name) && !/\.(example|sample|template|dist|defaults)$|^\.envrc$/.test(name);
+}, envFinding = (path) => {
+  let rule = RULES.find((r) => r.id === "SEC004");
+  return { id: rule.id, severity: rule.severity, title: rule.title, fix: rule.fix, line: 1, snippet: base(path) };
+}, base = (path) => path.split(/[\\/]/).pop() ?? path, AGENT_CONFIG = /(^|[\\/])(\.claude[\\/]settings(\.local)?\.json|\.mcp\.json|\.(cursor|vscode)[\\/]mcp\.json|claude_desktop_config\.json|hooks[\\/]hooks\.json)$/, INSTRUCTIONS = /(^|[\\/])(CLAUDE(\.local)?\.md|AGENTS\.md|GEMINI\.md|SKILL\.md|\.cursorrules|\.windsurfrules|copilot-instructions\.md|\.cursor[\\/]rules[\\/].+\.mdc?|\.claude[\\/](commands|agents)[\\/].+\.md)$/, classify = (path, text) => {
   let name = base(path);
   if (/\.github[\\/](workflows[\\/][^\\/]+|actions[\\/].+[\\/]action)\.ya?ml$/.test(path))
     return "workflow";
@@ -301,14 +509,68 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     return "dockerfile";
   if (/\.tf$/.test(name))
     return "terraform";
+  if (/^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(name))
+    return "compose";
+  if (name === "package.json")
+    return "npm";
+  if (name === ".guard.json")
+    return "guard";
+  if (AGENT_CONFIG.test(path))
+    return "agent";
+  if (INSTRUCTIONS.test(path))
+    return "instructions";
   if (/\.ya?ml$/.test(name) && /^apiVersion:/m.test(text) && /^kind:/m.test(text))
+    return "kubernetes";
+  if (/(^|[\\/])values(\.[\w-]+)?\.ya?ml$/.test(path) && /(^|[\\/])(charts?|helm)[\\/]/.test(path))
     return "kubernetes";
   return "other";
 }, SKIP_SECRETS = /\.(lock|min\.js|map|svg|png|jpe?g|gif|pdf)$|(^|[\\/])(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock)$/, isIgnored = (lines, index, id) => [lines[index], lines[index - 1]].some((l) => {
   let m = /guard:ignore(?:\s+([A-Z0-9, ]+))?/.exec(l ?? "");
   return m !== null && (m[1] === void 0 || m[1].split(/[\s,]+/).includes(id));
-}), scan = (path, text) => {
-  let kind = classify(path, text), lines = text.split(/\r?\n/), findings = [], rules = RULES.filter((r) => r.kind === kind || r.kind === "any" && !SKIP_SECRETS.test(path)), add = (rule, index, severity = rule.severity) => {
+}), NO_CONFIG = { rules: [], disabled: /* @__PURE__ */ new Set }, CONFIG_FILE = ".guard.json", parseConfig = (text) => {
+  if (text === void 0 || text.trim() === "")
+    return { config: NO_CONFIG, errors: [] };
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (error) {
+    return { config: NO_CONFIG, errors: [`.guard.json is not valid JSON: ${error.message}`] };
+  }
+  let errors = [], builtIn = new Set(RULES.map((r) => r.id)), rules = [];
+  for (let raw of Array.isArray(json.rules) ? json.rules : []) {
+    let r = raw, id = typeof r.id === "string" ? r.id : "", severity = r.severity;
+    if (!/^[A-Z][A-Z0-9_-]{1,15}$/.test(id) || builtIn.has(id)) {
+      errors.push(`rule "${id}": id must be upper-case letters/digits and not a built-in id`);
+      continue;
+    }
+    if (!SEVERITIES.includes(severity) || typeof r.title !== "string" || typeof r.pattern !== "string") {
+      errors.push(`rule ${id}: needs severity (low|medium|high|critical), title and pattern`);
+      continue;
+    }
+    try {
+      if (r.pattern.length > 500 || typeof r.files === "string" && r.files.length > 500)
+        throw Error("pattern longer than 500 characters");
+      let pattern = new RegExp(r.pattern);
+      rules.push({
+        id,
+        kind: "any",
+        severity,
+        title: r.title,
+        fix: typeof r.fix === "string" ? r.fix : "See the team rule in .guard.json.",
+        paths: typeof r.files === "string" ? new RegExp(r.files) : void 0,
+        line: (line) => pattern.test(line)
+      });
+    } catch (error) {
+      errors.push(`rule ${id}: ${error.message}`);
+    }
+  }
+  let disabled = new Set(Array.isArray(json.disable) ? json.disable.filter((d) => typeof d === "string") : []);
+  return { config: { rules, disabled }, errors };
+}, scan = (path, text, config = NO_CONFIG) => {
+  let kind = classify(path, text), lines = text.split(/\r?\n/), findings = [], rules = [
+    ...RULES.filter((r) => !config.disabled.has(r.id) && (r.kind === kind || r.kind === "any" && !SKIP_SECRETS.test(path))),
+    ...config.rules.filter((r) => r.paths === void 0 || r.paths.test(path))
+  ], add = (rule, index, severity = rule.severity) => {
     if (isIgnored(lines, index, rule.id))
       return;
     findings.push({
@@ -352,7 +614,7 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     return !0;
   });
 };
-var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDFE8", low: "⬜" }, SECRET_RULES = /* @__PURE__ */ new Set(["SEC001", "SEC002", "DKR003", "TF005"]), mask = (line) => line.replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead, value) => `${lead}${value.slice(0, 3)}****`).replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, "$1****"), formatFindings = (path, findings) => findings.map((f) => {
+var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDFE8", low: "⬜" }, SECRET_RULES = /* @__PURE__ */ new Set(["SEC001", "SEC002", "DKR003", "TF005", "CMP004", "AGT004"]), mask = (line) => line.replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead, value) => `${lead}${value.slice(0, 3)}****`).replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, "$1****"), formatFindings = (path, findings) => findings.map((f) => {
   let shown = SECRET_RULES.has(f.id) ? mask(f.snippet) : f.snippet;
   return `${ICON[f.severity]} ${f.id} [${f.severity}] ${base(path)}:${f.line}: ${f.title}
    ${shown}
@@ -361,7 +623,10 @@ var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDF
 `);
 
 // cli/guard-scan.ts
-var args = process.argv.slice(2), paths = args.filter((a) => !a.startsWith("--")), isAll = args.includes("--all") || paths.length > 0, blockAt = args.find((a) => a.startsWith("--block-at="))?.split("=")[1] ?? "high", git = (...argv) => {
+var args = process.argv.slice(2), paths = args.filter((a) => !a.startsWith("--")), isAll = args.includes("--all") || paths.length > 0, blockAt = args.find((a) => a.startsWith("--block-at="))?.split("=")[1] ?? "high", format = args.find((a) => a.startsWith("--format="))?.split("=")[1] ?? "text";
+if (format !== "text" && format !== "sarif")
+  console.error(`shift-left-guard: unknown --format=${format} (text or sarif)`), process.exit(2);
+var git = (...argv) => {
   try {
     return execFileSync("git", argv, { encoding: "utf8", maxBuffer: 67108864, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
@@ -376,16 +641,56 @@ var args = process.argv.slice(2), paths = args.filter((a) => !a.startsWith("--")
 }, isText = (text) => text.length < 1e6 && !text.includes("\x00"), files = (paths.length > 0 ? paths.join("\x00") : isAll ? git("ls-files", "-z") : git("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"))?.split("\x00").filter(Boolean);
 if (files === void 0)
   console.error("shift-left-guard: not a git repository"), process.exit(2);
-var color = process.stdout.isTTY ? (code, text) => `\x1B[${code}m${text}\x1B[0m` : (_, text) => text, blocking = 0, other = 0;
+var top = git("rev-parse", "--show-toplevel")?.trim(), { config, errors } = parseConfig(top === void 0 ? void 0 : readFile(`${top}/${CONFIG_FILE}`));
+for (let error of errors)
+  console.error(`shift-left-guard: ${CONFIG_FILE}: ${error}`);
+var color = process.stdout.isTTY ? (code, text) => `\x1B[${code}m${text}\x1B[0m` : (_, text) => text, blocking = 0, other = 0, results = [];
 for (let path of files) {
   let after = isAll ? readFile(path) : git("show", `:${path}`);
   if (after === void 0 || !isText(after))
     continue;
-  let found = isAll ? scan(path, after) : introduced(scan(path, git("show", `HEAD:${path}`) ?? ""), scan(path, after));
+  let found = isAll ? scan(path, after, config) : introduced(scan(path, git("show", `HEAD:${path}`) ?? "", config), scan(path, after, config));
+  if (isEnvFile(path) && !config.disabled.has("SEC004"))
+    found.unshift(envFinding(path));
   if (found.length === 0)
     continue;
   let stop = found.filter((f) => rank(f.severity) >= rank(blockAt));
-  blocking += stop.length, other += found.length - stop.length, console.log(formatFindings(path, found)), console.log();
+  if (blocking += stop.length, other += found.length - stop.length, results.push(...found.map((finding) => ({ path, finding }))), format === "text")
+    console.log(formatFindings(path, found)), console.log();
+}
+if (format === "sarif") {
+  let level = (s) => s === "critical" || s === "high" ? "error" : s === "medium" ? "warning" : "note", rules = [...RULES, ...config.rules], used = [...new Set(results.map((r) => r.finding.id))];
+  console.log(JSON.stringify({
+    $schema: "https://json.schemastore.org/sarif-2.1.0.json",
+    version: "2.1.0",
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: "shift-left-guard",
+            informationUri: "https://github.com/PascalNehlsen/shift-left-guard",
+            rules: used.map((id) => {
+              let rule = rules.find((r) => r.id === id);
+              return {
+                id,
+                shortDescription: { text: rule?.title ?? id },
+                help: { text: rule?.fix ?? "" },
+                defaultConfiguration: { level: level(rule?.severity ?? "medium") },
+                properties: { "security-severity": { critical: "9.5", high: "7.5", medium: "5.0", low: "2.0" }[rule?.severity ?? "medium"] }
+              };
+            })
+          }
+        },
+        results: results.map(({ path, finding }) => ({
+          ruleId: finding.id,
+          ruleIndex: used.indexOf(finding.id),
+          level: level(finding.severity),
+          message: { text: `${finding.title}. Fix: ${finding.fix}` },
+          locations: [{ physicalLocation: { artifactLocation: { uri: path }, region: { startLine: finding.line } } }]
+        }))
+      }
+    ]
+  }, null, 2)), process.exit(blocking > 0 ? 1 : 0);
 }
 if (blocking > 0)
   console.log(color(31, `\uD83D\uDEE1 shift-left-guard: ${blocking} issue(s) at or above ${blockAt}. Commit stopped.`)), console.log(color(2, "   Fix them, silence a line with `# guard:ignore <ID>`, or skip once with `git commit --no-verify`.")), process.exit(1);

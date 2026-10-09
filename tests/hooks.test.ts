@@ -212,6 +212,30 @@ describe('shell writes', () => {
   })
 })
 
+describe('repository config', () => {
+  test('.guard.json adds team rules and switches built-ins off for Write', async ($, on) => {
+    const files: Record<string, string> = {
+      '/repo/.guard.json': JSON.stringify({
+        rules: [{ id: 'ACME001', severity: 'high', title: 'Internal registry only', fix: 'Use registry.acme.io', pattern: '^FROM (?!registry\\.acme\\.io)' }],
+        disable: ['GHA003'],
+      }),
+    }
+    const disk = fakeRepo(on, files)
+    const injected = await $.tool.call({ tool: 'Write', file_path: WORKFLOW, content: UNSAFE })
+    expect(injected.deny).toBeUndefined()
+    const docker = await $.tool.call({ tool: 'Write', file_path: '/repo/Dockerfile', content: 'FROM node:22\nUSER app\n' })
+    expect(docker.deny ?? '').toContain('ACME001')
+    expect(disk.writes).toEqual([WORKFLOW])
+  })
+
+  test('a new .env that git does not ignore is stopped', async ($, on) => {
+    const disk = fakeRepo(on, {})
+    const r = await $.tool.call({ tool: 'Write', file_path: '/repo/.env', content: 'DEBUG=1\n' })
+    expect(r.deny ?? '').toContain('SEC004')
+    expect(disk.writes).toEqual([])
+  })
+})
+
 describe('install-hook', () => {
   test('writes the scanner and a pre-commit hook', async ($, on) => {
     const files: Record<string, string> = {}

@@ -2,7 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { Finding, GuardEvent, Severity, Totals } from '../types'
-import { RULES, applyEdit, destructive, formatFindings, introduced, rank, scan } from './rules'
+import { CONFIG_FILE, RULES, applyEdit, destructive, envFinding, formatFindings, introduced, isEnvFile, parseConfig, rank, scan } from './rules'
+import type { GuardConfig } from './rules'
 
 const events = atom({ plugin: 'shift-left-guard', key: 'events' } as const, [])
 const totals = atom({ plugin: 'shift-left-guard', key: 'totals' } as const, { blocked: 0, warned: 0, fixed: 0, cloud: 0 })
@@ -58,6 +59,49 @@ const keyOf = (findings: readonly Finding[]) =>
     .sort()
     .join('|')
 
+const git = async ($: $, args: readonly string[], cwd?: string) => {
+  const ran = await $.process.run(['git', ...args], { cwd, timeoutMs: 10_000 }).catch(() => undefined)
+  return ran?.exitCode === 0 ? ran.stdout : undefined
+}
+
+const dirOf = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || '/'
+
+/** Repository roots by directory: a file's repo does not change within a session. */
+const roots = new Map<string, string | undefined>()
+const reportedConfigErrors = new Set<string>()
+
+const repoOf = async ($: $, path: string) => {
+  const dir = dirOf(path)
+  if (!roots.has(dir)) {
+    const top = (await git($, ['rev-parse', '--show-toplevel'], dir))?.trim() ?? (await git($, ['rev-parse', '--show-toplevel']))?.trim()
+    roots.set(dir, top || undefined)
+  }
+  return roots.get(dir)
+}
+
+/** The repository's `.guard.json`, read on every check so an edit to it applies at once. */
+const configOf = async ($: $, top: string | undefined): Promise<GuardConfig> => {
+  if (top === undefined) return parseConfig(undefined).config
+  const { config, errors } = parseConfig(await $.fs.read(`${top}/${CONFIG_FILE}`).catch(() => undefined))
+  for (const error of errors) {
+    if (reportedConfigErrors.has(error)) continue
+    reportedConfigErrors.add(error)
+    $.ui.toast(`🛡 ${CONFIG_FILE}: ${error}`)
+  }
+  return config
+}
+
+/** Scans `after` against `before` with the repo's config, plus the git-ignore check for a new env file. */
+const findingsFor = async ($: $, path: string, before: string, after: string, top: string | undefined) => {
+  const config = await configOf($, top)
+  const found = introduced(scan(path, before, config), scan(path, after, config))
+  if (before === '' && top !== undefined && isEnvFile(path) && !config.disabled.has('SEC004')) {
+    const ignored = await $.process.run(['git', 'check-ignore', '-q', path], { cwd: top, timeoutMs: 10_000 }).catch(() => undefined)
+    if (ignored?.exitCode === 1) found.unshift(envFinding(path))
+  }
+  return found
+}
+
 /** Judges the file as it will stand after the call; answers the call. */
 async function guard(
   $: $,
@@ -69,7 +113,7 @@ async function guard(
   if (after === undefined || (await read($, isPaused))) return run()
 
   const before = await $.fs.read(path).catch(() => '')
-  const found = introduced(scan(path, before), scan(path, after))
+  const found = await findingsFor($, path, before, after, await repoOf($, path))
   const blocking = found.filter(f => rank(f.severity) >= rank(blockAt))
   const warnings = found.filter(f => rank(f.severity) < rank(blockAt))
   const open = (await read($, pending))[path]
@@ -135,11 +179,6 @@ async function guard(
   }
 }
 
-const git = async ($: $, args: readonly string[], cwd?: string) => {
-  const ran = await $.process.run(['git', ...args], { cwd, timeoutMs: 10_000 }).catch(() => undefined)
-  return ran?.exitCode === 0 ? ran.stdout : undefined
-}
-
 /**
  * After a shell command: scans the files it changed (anything git sees as
  * modified or new, touched since the command started) against HEAD, and
@@ -174,7 +213,7 @@ async function checkShellWrites(
     const after = await $.fs.read(path).catch(() => undefined)
     if (after === undefined || after.includes('\0')) continue
     const before = (await git($, ['show', `HEAD:${rel}`], top)) ?? ''
-    const found = introduced(scan(path, before), scan(path, after))
+    const found = await findingsFor($, path, before, after, top)
     const blocking = found.filter(f => rank(f.severity) >= rank(blockAt))
 
     if (blocking.length > 0) {

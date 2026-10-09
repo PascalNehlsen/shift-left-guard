@@ -22,7 +22,7 @@ Try your local copy in a real session with `claude --plugin-dir .`.
 ## Adding a rule
 
 1. Add one object to `RULES` in [`hooks/rules.ts`](hooks/rules.ts): `id`, `kind`, `severity`, `title`, `fix`, and a `line` or `file` matcher.
-   - **IDs** continue the prefix: `GHA`, `DKR`, `TF`, `K8S`, `SEC`.
+   - **IDs** continue the prefix: `GHA`, `DKR`, `TF`, `K8S`, `CMP`, `NPM`, `AGT`, `SEC`.
    - **`fix`** is what Claude reads. Make it concrete enough to act on without a web search.
    - **Severity:** `high` and `critical` block the write by default, so reserve them for issues that are exploitable as written.
 2. Add a test to [`tests/rules.test.ts`](tests/rules.test.ts) with at least **one positive and one negative example**. The negative example is the safe code that must *not* be flagged.
