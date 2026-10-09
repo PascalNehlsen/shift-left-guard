@@ -218,7 +218,14 @@ async function installHook($: $, blockAt: string): Promise<string> {
   await $.fs.write(`${gitDir}/shift-left-guard/guard-scan.mjs`, scanner)
   const line = HOOK_LINE(blockAt === 'never' ? 'critical' : blockAt)
 
-  const hooksPath = (await git($, ['config', '--get', 'core.hooksPath']))?.trim()
+  // Claude Code runs git with core.hooksPath=/dev/null in "command" scope so its
+  // own git calls skip hooks. Only a repo/user/system setting means the hooks live elsewhere.
+  const hooksPath = (await git($, ['config', '--show-scope', '--get-all', 'core.hooksPath']))
+    ?.split('\n')
+    .map(l => l.split('\t'))
+    .filter(([scope, value]) => scope !== 'command' && value)
+    .at(-1)?.[1]
+    ?.trim()
   if (hooksPath) {
     return [
       `Scanner copied to ${gitDir}/shift-left-guard/. This repo uses core.hooksPath (${hooksPath}, e.g. husky), so add this line to its pre-commit hook yourself:`,
