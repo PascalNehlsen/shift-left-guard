@@ -193,6 +193,23 @@ describe('shell writes', () => {
     const r = await $.tool.call(bash('ls'))
     expect(r.context ?? []).toEqual([])
   })
+
+  test('a failing scan keeps the command result and does not run it twice', async ($, on) => {
+    fakeDisk(on, { '/repo/a.yml': UNSAFE })
+    on('process.run', () => ({
+      value: { exitCode: 0, stdout: '/repo\0a.yml', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }))
+    on('fs.stat', () => ({ value: null as never }))
+    let runs = 0
+    on('tool.call', { tool: 'Bash' }, () => {
+      runs += 1
+      return { result: { stdout: 'done', stderr: '', interrupted: false } as never }
+    })
+    const r = await $.tool.call(bash('ls'))
+    expect(r.deny).toBeUndefined()
+    expect((r.result as { stdout?: string } | undefined)?.stdout).toBe('done')
+    expect(runs).toBe(1)
+  })
 })
 
 describe('install-hook', () => {
