@@ -282,7 +282,8 @@ export const register: Register = (on, options) => {
     const startedAt = Date.now()
     const ran = await next(e)
     return checkShellWrites($, blockAt, startedAt, ran)
-  })
+    // The command already ran, so a failing scan hands Claude its result as is.
+  }).catch(($, e, next) => next(e))
 
   on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
     const verdict = await next(e)
