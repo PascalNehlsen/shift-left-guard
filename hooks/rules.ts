@@ -1046,6 +1046,7 @@ const READ_ONLY = new Set([
   'ls', 'cat', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'rg', 'ag', 'wc', 'pwd', 'echo', 'printf', 'which', 'type',
   'file', 'stat', 'du', 'df', 'tree', 'jq', 'yq', 'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname',
   'realpath', 'readlink', 'date', 'whoami', 'id', 'uname', 'env', 'printenv', 'true', 'test', '[', 'nl', 'column',
+  'cd', 'pushd', 'popd',
 ])
 const READ_ONLY_GIT = new Set(['status', 'log', 'diff', 'show', 'branch', 'rev-parse', 'ls-files', 'blame', 'remote', 'describe', 'tag'])
 
@@ -1064,5 +1065,27 @@ export const isReadOnlyCommand = (command: string) => {
     if (program === 'find') return !/\s-(exec|execdir|ok|delete|fprint\w*)\b/.test(segment)
     if (program === 'sed') return !/\s(-i|--in-place)/.test(segment)
     return READ_ONLY.has(program)
+  })
+}
+
+/** Heredoc bodies and quoted strings removed: a commit message is text, not a command. */
+const withoutQuoted = (command: string) =>
+  command
+    .replace(/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s*\2\b/g, ' ')
+    .replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, ' ')
+
+export const PUBLISH = /\bgit\s+(?:-C\s+\S+\s+)?(commit|push)\b|\bgh\s+pr\s+(create|merge)\b/
+
+/**
+ * Whether one shell command both changes files and commits or pushes them.
+ * The guard checks what a command wrote only after it ran, which for such a
+ * command is after the commit, so it asks for the two to be split.
+ */
+export const writesAndPublishes = (command: string) => {
+  const bare = withoutQuoted(command)
+  if (!PUBLISH.test(bare)) return false
+  return bare.split(/&&|\|\||[;|\n]/).some(segment => {
+    const program = segment.trim().split(/\s+/).find(w => !/^\w+=/.test(w)) ?? ''
+    return program !== '' && program !== 'git' && program !== 'gh' && !isReadOnlyCommand(segment)
   })
 }

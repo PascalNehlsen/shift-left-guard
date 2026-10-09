@@ -830,7 +830,10 @@ var READ_ONLY = new Set([
   "test",
   "[",
   "nl",
-  "column"
+  "column",
+  "cd",
+  "pushd",
+  "popd"
 ]);
 var READ_ONLY_GIT = new Set(["status", "log", "diff", "show", "branch", "rev-parse", "ls-files", "blame", "remote", "describe", "tag"]);
 
