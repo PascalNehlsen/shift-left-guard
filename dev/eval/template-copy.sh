@@ -32,7 +32,7 @@ for i in $(seq 1 "$runs"); do
   # The fixture is stored with .txt names so the guard's own checks leave it alone in this repository.
   cp -r "$here/fixture/." "$d/repo/"
   mv "$d/repo/templates/greet.yml.txt" "$d/repo/templates/greet.yml"
-  mv "$d/repo/Dockerfile.txt" "$d/repo/Dockerfile"
+  mv "$d/repo/container.txt" "$d/repo/Dockerfile"
   (cd "$d/repo" && git init -q -b main && git config user.email eval@example.com && git config user.name eval &&
     git add -A && git commit -qm init)
 
