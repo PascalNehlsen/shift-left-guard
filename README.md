@@ -1,5 +1,11 @@
 # 🛡 Shift-Left Guard
 
+<p align="center">
+  <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/zizmor.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/zizmor.yml/badge.svg" alt="zizmor"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
 **DevSecOps guardrails for Claude Code.** Every GitHub Actions workflow, Dockerfile, Terraform file, Kubernetes manifest and secret that Claude writes is checked *before* it hits your disk. When something is wrong, Claude gets the findings and fixes them itself. Destructive cloud commands come to you before they run.
 
 ![Shift-Left Guard blocking a script injection and Claude fixing it](docs/demo.gif)
@@ -8,6 +14,23 @@ CI scanners find these problems after the push. Shift-Left Guard stops them whil
 
 > [!TIP]
 > No binaries, no API keys, no network. All rules run inside the mod, so it works the moment it is installed.
+
+## Table of Contents
+
+- [Why, if Claude already writes secure code?](#why-if-claude-already-writes-secure-code)
+- [Install](#install)
+  - [After installing](#after-installing)
+- [What it does](#what-it-does)
+  - [Commands](#commands)
+- [Privacy: does Claude read my secrets?](#privacy-does-claude-read-my-secrets)
+- [Scope: what is checked when?](#scope-what-is-checked-when)
+- [Rules](#rules)
+  - [Silencing a finding](#silencing-a-finding)
+- [Settings](#settings)
+- [CI](#ci)
+- [What it is not](#what-it-is-not)
+- [Develop](#develop)
+- [License](#license)
 
 ## Why, if Claude already writes secure code?
 
@@ -86,7 +109,7 @@ No secret leaves your machine because of this mod.
 | Claude | `Write` / `Edit` tool | ✅ before the write, can block |
 | Claude | Bash (`sed -i`, `cat >`, scripts …) | ✅ right after the command, Claude must fix |
 | You | your editor | ✅ at `git commit`, with `/guard install-hook` |
-| Anyone | CI | ✅ with `node guard-scan.mjs --all` ([see below](#ci)) |
+| Anyone | CI | ✅ with `guard-scan.mjs --all` ([see below](#ci)) |
 
 Only the changed file is scanned, and only what the change introduces is reported. A file such as `abc.yml` gets the full rule set when it is a workflow (`.github/workflows/`) or a Kubernetes manifest (`apiVersion:` + `kind:`). Any other file is checked for secrets only.
 
@@ -142,11 +165,14 @@ Add `# guard:ignore` (all rules) or `# guard:ignore GHA001` (one rule) on the li
 
 ## CI
 
-The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](bin/guard-scan.mjs), and works in any pipeline:
+The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](bin/guard-scan.mjs), with no dependencies. Download it from a release tag and run it in any pipeline that has Node:
 
 ```yaml
+- run: curl -fsSLO https://raw.githubusercontent.com/PascalNehlsen/shift-left-guard/v0.1.0/bin/guard-scan.mjs
 - run: node guard-scan.mjs --all --block-at=high
 ```
+
+Pin the tag (or a commit SHA) rather than `main`, so a new release never changes your pipeline unreviewed.
 
 `--all` audits every tracked file. Without it, the script scans staged changes only (pre-commit mode).
 
@@ -161,17 +187,15 @@ The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](b
 ## Develop
 
 ```bash
-bun run build              # bundle cli/guard-scan.ts → bin/guard-scan.mjs
-claude plugin validate .
-claude plugin test .
+npm ci && npm test         # pinned Claude Code CLI + plugin tests
 claude --plugin-dir .      # run a session with the local copy
 ```
 
 > [!WARNING]
 > If you also have the plugin installed, a `--plugin-dir` session runs **both** copies, so every finding is reported twice. Disable the installed one while developing: `claude plugin disable shift-left-guard`.
 
-Rules live in [`hooks/rules.ts`](hooks/rules.ts): one object per rule (`id`, `kind`, `severity`, `title`, `fix`, and a `line` or `file` matcher). PRs with new rules and a test welcome. Run `bun run build` after changing rules so the pre-commit scanner matches.
+New rules, false-positive fixes and better fix texts are very welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to add a rule. Security issues in the guard itself go through [SECURITY.md](SECURITY.md), not public issues.
 
 ## License
 
-MIT, built by [Pascal Nehlsen](https://github.com/PascalNehlsen) for DevSecOps teaching at Developer Akademie.
+MIT, built by [Pascal Nehlsen](https://github.com/PascalNehlsen).
