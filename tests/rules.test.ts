@@ -135,6 +135,7 @@ describe('secrets', () => {
   test('finds real-looking keys anywhere, skips documented examples', async () => {
     expect(ids('/r/app/settings.py', `KEY = "AKIA${'Q'.repeat(16)}"`)).toEqual(['SEC002'])
     expect(ids('/r/README.md', 'aws_access_key_id = AKIAIOSFODNN7EXAMPLE')).toEqual([])
+    // guard:ignore SEC001 test fixture, not a key
     expect(ids('/r/id', '-----BEGIN OPENSSH PRIVATE KEY-----')).toEqual(['SEC001'])
   })
 })
