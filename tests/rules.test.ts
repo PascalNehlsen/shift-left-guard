@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { applyEdit, classify, destructive, formatFindings, introduced, isEnvFile, parseConfig, scan } from '../hooks/rules'
+import { EXPLAIN, RULES, applyEdit, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, parseConfig, scan } from '../hooks/rules'
 
 const ids = (path: string, text: string) => scan(path, text).map(f => f.id)
 
@@ -173,10 +173,11 @@ describe('diffing and edits', () => {
 
 describe('cloud commands', () => {
   test('spots destructive commands and production targets', async () => {
-    expect(destructive('terraform destroy -var-file=prod.tfvars')).toEqual({
+    expect(destructive('terraform destroy -var-file=prod.tfvars')).toMatchObject({
       reason: 'Terraform change without a reviewed plan',
       isProd: true,
     })
+    expect(destructive('terraform destroy')?.undo).toContain('gone')
     expect(destructive('gcloud run services delete api --region europe-west3')?.reason).toBe('gcloud delete')
     expect(destructive('aws s3 rm s3://bucket --recursive')).toBeDefined()
     expect(destructive('az group delete -n rg-dev')).toBeDefined()
@@ -445,5 +446,35 @@ describe('env files', () => {
     expect(isEnvFile('/r/config/prod.env')).toBe(true)
     expect(isEnvFile('/r/.env.example')).toBe(false)
     expect(isEnvFile('/r/.envrc')).toBe(false)
+  })
+})
+
+describe('blast radius', () => {
+  test('names what a destructive command would hit', async () => {
+    expect(blastRadius('gcloud sql instances delete db --project=acme-prod --region europe-west3')).toEqual([
+      { label: 'project', value: 'acme-prod' },
+      { label: 'region', value: 'europe-west3' },
+    ])
+    expect(blastRadius('kubectl --context gke-prod delete ns -n payments')).toEqual([
+      { label: 'kube context', value: 'gke-prod' },
+      { label: 'namespace', value: 'payments' },
+    ])
+    expect(blastRadius('az group delete -n rg-dev')).toEqual([{ label: 'name', value: 'rg-dev' }])
+    expect(blastRadius('aws s3 rm s3://logs/2025 --recursive --profile prod')).toEqual([
+      { label: 'AWS profile', value: 'prod' },
+      { label: 'bucket', value: 'logs/2025' },
+    ])
+  })
+})
+
+describe('learning mode', () => {
+  test('every built-in rule has an explanation and a CWE', async () => {
+    expect(RULES.filter(r => EXPLAIN[r.id] === undefined).map(r => r.id)).toEqual([])
+  })
+
+  test('adds why and the CWE link only when asked', async () => {
+    const found = scan('/r/Dockerfile', 'FROM node:latest\nUSER app')
+    expect(formatFindings('/r/Dockerfile', found)).not.toContain('why:')
+    expect(formatFindings('/r/Dockerfile', found, true)).toContain('cwe.mitre.org/data/definitions/1104.html')
   })
 })

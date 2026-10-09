@@ -20,6 +20,12 @@
       "description": "ask: put terraform destroy, gcloud/aws/az deletes, kubectl delete ns and the like to you first. deny: Claude never runs them. off: no check.",
       "default": "ask",
       "options": ["ask", "deny", "off"]
+    },
+    "explain": {
+      "type": "boolean",
+      "title": "Learning mode",
+      "description": "Explain every finding: why it is dangerous, its CWE, and Claude explains it to you in its reply. Made for learners and teams new to DevSecOps.",
+      "default": false
     }
   }
 }

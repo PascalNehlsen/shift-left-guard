@@ -15,6 +15,8 @@ export type GuardEvent = {
   action: 'blocked' | 'flagged' | 'warned' | 'fixed' | 'let-through' | 'cloud'
   findings: { id: string; severity: Severity; title: string; line: number }[]
   note?: string
+  /** Lines the fix took out (or the offending line, while blocked) and put in. */
+  diff?: { minus: string[]; plus: string[] }
 }
 
 export type Totals = { blocked: number; warned: number; fixed: number; cloud: number }
@@ -25,9 +27,11 @@ declare module 'claude-code' {
       events: GuardEvent[]
       totals: Totals
       /** Rule ids still blocked per file, cleared when a clean write follows. */
-      pending: Record<string, { ids: string[]; attempts: number; key: string }>
+      pending: Record<string, { ids: string[]; attempts: number; key: string; line?: number; window?: string[] }>
       isPaused: boolean
       isBandHidden: boolean
+      /** What the guard did to each tool call, by tool_use_id, for the 🛡 mark on its transcript row. */
+      verdicts: Record<string, { action: GuardEvent['action'] | 'clean'; ids: string[] }>
     }
   }
 }

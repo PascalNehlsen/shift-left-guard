@@ -2,7 +2,22 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { Finding, GuardEvent, Severity, Totals } from '../types'
-import { CONFIG_FILE, RULES, applyEdit, destructive, envFinding, formatFindings, introduced, isEnvFile, parseConfig, rank, scan } from './rules'
+import {
+  CONFIG_FILE,
+  EXPLAIN,
+  RULES,
+  applyEdit,
+  blastRadius,
+  destructive,
+  envFinding,
+  formatFindings,
+  introduced,
+  isEnvFile,
+  parseConfig,
+  rank,
+  scan,
+  shown,
+} from './rules'
 import type { GuardConfig } from './rules'
 
 const events = atom({ plugin: 'shift-left-guard', key: 'events' } as const, [])
@@ -10,6 +25,7 @@ const totals = atom({ plugin: 'shift-left-guard', key: 'totals' } as const, { bl
 const pending = atom({ plugin: 'shift-left-guard', key: 'pending' } as const, {})
 const isPaused = atom({ plugin: 'shift-left-guard', key: 'isPaused' } as const, false)
 const isBandHidden = atom({ plugin: 'shift-left-guard', key: 'isBandHidden' } as const, false)
+const verdicts = atom({ plugin: 'shift-left-guard', key: 'verdicts' } as const, {})
 
 const LIFETIME = 'lifetime'
 const MAX_ATTEMPTS = 2
@@ -18,6 +34,36 @@ const MAX_SHELL_FILES = 40
 const MAX_FILE_BYTES = 1_000_000
 
 type $ = EngineInterface
+type Opts = { blockAt: Severity | 'never'; explain: boolean }
+type Verdict = GuardEvent['action'] | 'clean'
+
+const MAX_VERDICTS = 200
+const DIFF_CONTEXT = 3
+
+/** Marks a tool call's transcript row with what the guard did to it. */
+const mark = async ($: $, toolUseId: string | undefined, action: Verdict, ids: readonly string[] = []) => {
+  if (toolUseId === undefined) return
+  await update($, verdicts, v => Object.fromEntries([...Object.entries(v), [toolUseId, { action, ids: [...ids] }]].slice(-MAX_VERDICTS)))
+}
+
+/** The lines around a finding, so the band can show what the fix changed. */
+const windowAt = (text: string, line: number) => text.split(/\r?\n/).slice(Math.max(0, line - 1 - DIFF_CONTEXT), line + DIFF_CONTEXT)
+
+/**
+ * The lines the fix took out of the blocked version and the ones it put in,
+ * near where the finding was: the band's before/after.
+ */
+const diffOf = (id: string, blocked: readonly string[] | undefined, line: number | undefined, fixed: string) => {
+  if (blocked === undefined || line === undefined) return undefined
+  const now = fixed.split(/\r?\n/).slice(Math.max(0, line - 1 - DIFF_CONTEXT - 2), line + DIFF_CONTEXT + 2)
+  const show = (l: string) => shown({ id, snippet: l.trim() }).slice(0, 120)
+  const minus = blocked.filter(l => l.trim() !== '' && !now.includes(l)).slice(0, 3).map(show)
+  const plus = now.filter(l => l.trim() !== '' && !blocked.includes(l)).slice(0, 3).map(show)
+  return minus.length + plus.length === 0 ? undefined : { minus, plus }
+}
+
+const lessonFor = (opts: Opts) =>
+  opts.explain ? ['Learning mode is on: in your reply, explain to the user in one or two plain sentences why each finding matters (see "why:").'] : []
 
 const shortPath = (path: string) => path.split(/[\\/]/).slice(-3).join('/')
 
@@ -105,12 +151,14 @@ const findingsFor = async ($: $, path: string, before: string, after: string, to
 /** Judges the file as it will stand after the call; answers the call. */
 async function guard(
   $: $,
-  blockAt: Severity | 'never',
+  opts: Opts,
   path: string,
   after: string | undefined,
   run: () => Promise<ToolCallResult>,
+  toolUseId?: string,
 ): Promise<ToolCallResult> {
   if (after === undefined || (await read($, isPaused))) return run()
+  const { blockAt } = opts
 
   const before = await $.fs.read(path).catch(() => '')
   const found = await findingsFor($, path, before, after, await repoOf($, path))
@@ -123,16 +171,23 @@ async function guard(
     const attempts = open?.key === key ? open.attempts + 1 : 1
 
     if (attempts <= MAX_ATTEMPTS) {
-      await update($, pending, p => ({ ...p, [path]: { ids: blocking.map(f => f.id), attempts, key } }))
-      await record($, { at: Date.now(), file: path, action: 'blocked', findings: brief(blocking) }, { blocked: blocking.length })
+      const line = blocking[0]?.line ?? 1
+      await update($, pending, p => ({ ...p, [path]: { ids: blocking.map(f => f.id), attempts, key, line, window: windowAt(after, line) } }))
+      await record(
+        $,
+        { at: Date.now(), file: path, action: 'blocked', findings: brief(blocking), diff: { minus: [shown(blocking[0]!).slice(0, 120)], plus: [] } },
+        { blocked: blocking.length },
+      )
+      await mark($, toolUseId, 'blocked', blocking.map(f => f.id))
       if (blocking.some(f => f.severity === 'critical')) {
         $.ui.toast(`🛡 Blocked a critical issue in ${shortPath(path)}: ${blocking[0]?.title}`)
       }
       return {
         deny: [
           `shift-left-guard stopped this write: it would introduce ${blocking.length} security issue(s) in ${path}.`,
-          formatFindings(path, blocking),
+          formatFindings(path, blocking, opts.explain),
           'Fix these and write the file again. Keep the rest of your change as it was.',
+          ...lessonFor(opts),
           'If a finding is a false positive, explain why to the user; add a `# guard:ignore <ID>` comment only when the user agrees.',
         ].join('\n\n'),
       }
@@ -146,13 +201,14 @@ async function guard(
       { warned: blocking.length },
     )
     $.ui.toast(`🛡 Let ${shortPath(path)} through with ${blocking.length} open issue(s): see /guard`)
+    await mark($, toolUseId, 'let-through', blocking.map(f => f.id))
     const ran = await run()
     return ran.deny === undefined && !ran.isError
       ? {
           ...ran,
           context: [
             ...(ran.context ?? []),
-            `shift-left-guard let this write through with unresolved issues. Tell the user about them:\n${formatFindings(path, blocking)}`,
+            `shift-left-guard let this write through with unresolved issues. Tell the user about them:\n${formatFindings(path, blocking, opts.explain)}`,
           ],
         }
       : ran
@@ -164,17 +220,23 @@ async function guard(
   if (open !== undefined) {
     await update($, pending, ({ [path]: _, ...rest }) => rest)
     const fixed = RULES.filter(r => open.ids.includes(r.id)).map(r => ({ id: r.id, severity: r.severity, title: r.title, line: 0 }))
-    await record($, { at: Date.now(), file: path, action: 'fixed', findings: fixed }, { fixed: open.ids.length })
+    const diff = diffOf(open.ids[0] ?? '', open.window, open.line, after)
+    await record($, { at: Date.now(), file: path, action: 'fixed', findings: fixed, diff }, { fixed: open.ids.length })
+    await mark($, toolUseId, 'fixed', open.ids)
   }
 
-  if (warnings.length === 0) return ran
+  if (warnings.length === 0) {
+    if (open === undefined) await mark($, toolUseId, 'clean')
+    return ran
+  }
 
   await record($, { at: Date.now(), file: path, action: 'warned', findings: brief(warnings) }, { warned: warnings.length })
+  await mark($, toolUseId, 'warned', warnings.map(f => f.id))
   return {
     ...ran,
     context: [
       ...(ran.context ?? []),
-      `shift-left-guard noticed lower-severity issues in ${path}. Fix them if it fits the task, otherwise mention them to the user:\n${formatFindings(path, warnings)}`,
+      `shift-left-guard noticed lower-severity issues in ${path}. Fix them if it fits the task, otherwise mention them to the user:\n${formatFindings(path, warnings, opts.explain)}`,
     ],
   }
 }
@@ -187,11 +249,14 @@ async function guard(
  */
 async function checkShellWrites(
   $: $,
-  blockAt: Severity | 'never',
+  opts: Opts,
   startedAt: number,
   ran: ToolCallResult,
+  toolUseId?: string,
 ): Promise<ToolCallResult> {
   if (ran.deny !== undefined || (await read($, isPaused))) return ran
+  const { blockAt } = opts
+  const flagged: string[] = []
 
   const top = (await git($, ['rev-parse', '--show-toplevel']))?.trim()
   if (!top) return ran
@@ -217,21 +282,32 @@ async function checkShellWrites(
     const blocking = found.filter(f => rank(f.severity) >= rank(blockAt))
 
     if (blocking.length > 0) {
-      await update($, pending, p => ({ ...p, [path]: { ids: blocking.map(f => f.id), attempts: 1, key: keyOf(blocking) } }))
-      await record($, { at: Date.now(), file: path, action: 'flagged', findings: brief(blocking) }, { blocked: blocking.length })
+      const line = blocking[0]?.line ?? 1
+      await update($, pending, p => ({
+        ...p,
+        [path]: { ids: blocking.map(f => f.id), attempts: 1, key: keyOf(blocking), line, window: windowAt(after, line) },
+      }))
+      await record(
+        $,
+        { at: Date.now(), file: path, action: 'flagged', findings: brief(blocking), diff: { minus: [shown(blocking[0]!).slice(0, 120)], plus: [] } },
+        { blocked: blocking.length },
+      )
+      flagged.push(...blocking.map(f => f.id))
       if (blocking.some(f => f.severity === 'critical')) {
         $.ui.toast(`🛡 A shell command wrote a critical issue to ${shortPath(path)}: ${blocking[0]?.title}`)
       }
-      notes.push(formatFindings(path, blocking))
+      notes.push(formatFindings(path, blocking, opts.explain))
     } else if (open[path] !== undefined) {
-      const ids = open[path]?.ids ?? []
+      const was = open[path]!
       await update($, pending, ({ [path]: _, ...rest }) => rest)
-      const fixed = RULES.filter(r => ids.includes(r.id)).map(r => ({ id: r.id, severity: r.severity, title: r.title, line: 0 }))
-      await record($, { at: Date.now(), file: path, action: 'fixed', findings: fixed }, { fixed: ids.length })
+      const fixed = RULES.filter(r => was.ids.includes(r.id)).map(r => ({ id: r.id, severity: r.severity, title: r.title, line: 0 }))
+      const diff = diffOf(was.ids[0] ?? '', was.window, was.line, after)
+      await record($, { at: Date.now(), file: path, action: 'fixed', findings: fixed, diff }, { fixed: was.ids.length })
     }
   }
 
   if (notes.length === 0) return ran
+  await mark($, toolUseId, 'flagged', flagged)
   return {
     ...ran,
     context: [
@@ -239,6 +315,7 @@ async function checkShellWrites(
       [
         'shift-left-guard: this shell command wrote security issues to disk. The files are already changed, so fix them now, before anything else.',
         'Use the Edit tool for the fix so the guard checks it before it lands.',
+        ...lessonFor(opts),
         ...notes,
       ].join('\n\n'),
     ],
@@ -292,6 +369,16 @@ async function installHook($: $, blockAt: string): Promise<string> {
   ].join('\n')
 }
 
+const BADGE: Record<Verdict, (ids: string) => [string | undefined, string]> = {
+  blocked: ids => ['red', `blocked ${ids}`],
+  flagged: ids => ['red', `wrote ${ids}, fixing`],
+  fixed: ids => ['green', `fixed ${ids}`],
+  warned: ids => ['yellow', `noted ${ids}`],
+  'let-through': ids => ['yellow', `let through ${ids}`],
+  cloud: () => ['magenta', 'cloud guard'],
+  clean: () => [undefined, 'clean'],
+}
+
 const ACTION_LABEL: Record<GuardEvent['action'], string> = {
   blocked: '⛔ blocked',
   flagged: '⚠ shell wrote',
@@ -304,23 +391,58 @@ const ACTION_LABEL: Record<GuardEvent['action'], string> = {
 export const register: Register = (on, options) => {
   const blockAt = (options.blockAt ?? 'high') as Severity | 'never'
   const cloudGuard = (options.cloudGuard ?? 'ask') as 'ask' | 'deny' | 'off'
+  const opts: Opts = { blockAt, explain: options.explain === true }
+  /** Destructive commands the user approved in the guard's own dialog, so the permission check does not ask twice. */
+  const approved = new Set<string>()
 
   const failClosed = { deny: 'shift-left-guard could not check this write, so it was stopped. Try again, or run /guard pause.' }
 
-  on('tool.call', { tool: 'Write' }, ($, e, next) => guard($, blockAt, e.file_path, e.content, () => next(e))).catch(($, e, next) =>
+  on('tool.call', { tool: 'Write' }, ($, e, next) => guard($, opts, e.file_path, e.content, () => next(e), e.tool_use_id)).catch(($, e, next) =>
     next.called ? next(e) : failClosed,
   )
 
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const before = await $.fs.read(e.file_path).catch(() => undefined)
     const after = before === undefined ? undefined : applyEdit(before, e.old_string, e.new_string, e.replace_all)
-    return guard($, blockAt, e.file_path, after, () => next(e))
+    return guard($, opts, e.file_path, after, () => next(e), e.tool_use_id)
   }).catch(($, e, next) => (next.called ? next(e) : failClosed))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const hit = cloudGuard === 'ask' ? destructive(e.command) : undefined
+    if (hit !== undefined) {
+      const radius = blastRadius(e.command)
+      const answer = await $.ui
+        .ask(
+          [
+            `☁ ${hit.reason}${hit.isProd ? ' against PRODUCTION' : ''}`,
+            '',
+            `  ${e.command.length > 200 ? `${e.command.slice(0, 200)}…` : e.command}`,
+            '',
+            ...radius.map(r => `${r.label}: ${r.value}`),
+            `Undo: ${hit.undo}`,
+            '',
+            'Run this command?',
+          ].join('\n'),
+          { header: 'Cloud guard', options: hit.isProd ? ['Cancel', 'Run it'] : ['Run it', 'Cancel'] },
+        )
+        // Dismissed, or no one to ask: the permission check below still asks.
+        .catch(() => undefined)
+      if (answer !== undefined && answer !== 'Run it') {
+        await record(
+          $,
+          { at: Date.now(), file: e.command.slice(0, 120), action: 'cloud', findings: [], note: `${hit.reason}: declined by the user` },
+          { cloud: 1 },
+        )
+        await mark($, e.tool_use_id, 'cloud')
+        return {
+          deny: 'The user declined this destructive command in the shift-left-guard dialog. Do not retry it or work around it; ask the user how they want to proceed.',
+        }
+      }
+      if (answer === 'Run it' && e.tool_use_id !== undefined) approved.add(e.tool_use_id)
+    }
     const startedAt = Date.now()
     const ran = await next(e)
-    return checkShellWrites($, blockAt, startedAt, ran)
+    return checkShellWrites($, opts, startedAt, ran, e.tool_use_id)
     // The command already ran, so a failing scan hands Claude its result as is.
   }).catch(($, e, next) => next(e))
 
@@ -333,13 +455,22 @@ export const register: Register = (on, options) => {
     if (hit === undefined) return verdict
 
     const where = hit.isProd ? ' against PRODUCTION' : ''
+    const isApproved = e.tool_use_id !== undefined && approved.delete(e.tool_use_id)
     if (e.tool_use_id !== undefined) {
       await record(
         $,
-        { at: Date.now(), file: command.slice(0, 120), action: 'cloud', findings: [], note: `${hit.reason}${where} (${cloudGuard})` },
+        {
+          at: Date.now(),
+          file: command.slice(0, 120),
+          action: 'cloud',
+          findings: [],
+          note: `${hit.reason}${where} (${isApproved ? 'approved by the user' : cloudGuard})`,
+        },
         { cloud: 1 },
       )
+      await mark($, e.tool_use_id, 'cloud')
     }
+    if (isApproved) return verdict
     return cloudGuard === 'deny'
       ? {
           decision: 'deny',
@@ -431,13 +562,45 @@ export const register: Register = (on, options) => {
               ? ['yellow', `noted ${ids} in ${file}`]
               : ['magenta', `${last.note}: ${last.file.slice(0, 60)}`]
 
+    const diff = last.diff
+    return (
+      <Box flexDirection="column">
+        <Box>
+          <Text bold>🛡 Shift-Left Guard </Text>
+          <Text color={color}>{text} </Text>
+          <Button key="report" label="Report" onPress={() => $.ui.open({ id: PANE, title: 'Shift-Left Guard' })} />
+          <Text> </Text>
+          <Button key="hide" label="Hide" onPress={() => update($, isBandHidden, () => true)} />
+        </Box>
+        {diff?.minus.map((l, i) => (
+          <Text key={`m${i}`} color="red">
+            {'   - '}
+            {l}
+          </Text>
+        ))}
+        {diff?.plus.map((l, i) => (
+          <Text key={`p${i}`} color="green">
+            {'   + '}
+            {l}
+          </Text>
+        ))}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const verdict = (await read($, verdicts))[e.props.tool_use_id]
+    if (verdict === undefined) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const ids = verdict.ids.join(', ')
+    const [color, label] = BADGE[verdict.action as Verdict](ids)
     return (
       <Box>
-        <Text bold>🛡 Shift-Left Guard </Text>
-        <Text color={color}>{text} </Text>
-        <Button key="report" label="Report" onPress={() => $.ui.open({ id: PANE, title: 'Shift-Left Guard' })} />
-        <Text> </Text>
-        <Button key="hide" label="Hide" onPress={() => update($, isBandHidden, () => true)} />
+        {await next(e)}
+        <Text color={color} dimColor={verdict.action === 'clean'}>
+          {'  🛡 '}
+          {label}
+        </Text>
       </Box>
     )
   })
@@ -463,6 +626,11 @@ export const register: Register = (on, options) => {
             </Text>
             {(ev.action === 'blocked' || ev.action === 'flagged' || ev.action === 'let-through') && rule && (
               <Text dimColor>→ {rule.fix}</Text>
+            )}
+            {opts.explain && EXPLAIN[f.id] && (
+              <Text dimColor>
+                ? {EXPLAIN[f.id]!.why} (CWE-{EXPLAIN[f.id]!.cwe})
+              </Text>
             )}
           </Box>
         )

