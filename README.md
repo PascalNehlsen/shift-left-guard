@@ -29,6 +29,20 @@ In a Claude Code terminal session:
 
 Answer `y` to add the marketplace, then pick a scope (user scope = every project).
 
+### After installing
+
+There is nothing to switch on. The guard runs in every new session, in every project with user scope or in the chosen project with project scope. It stays invisible until it finds something; then the band above the prompt and the `🛡` status line appear.
+
+| To … | Do |
+|---|---|
+| pause it for this session | `/guard pause`, back on with `/guard resume` |
+| make it stricter or looser | `/config` → Shift-Left Guard → `blockAt` / `cloudGuard` ([Settings](#settings)) |
+| turn it off completely | `/plugin` → shift-left-guard → disable, or `claude plugin disable shift-left-guard` |
+| check your own commits too | run `/guard install-hook` **once per repo** |
+
+> [!NOTE]
+> The pre-commit hook is not installed automatically. The mod only guards what Claude writes, until you run `/guard install-hook` in a repo.
+
 ## What it does
 
 | | |
@@ -152,6 +166,9 @@ claude plugin validate .
 claude plugin test .
 claude --plugin-dir .      # run a session with the local copy
 ```
+
+> [!WARNING]
+> If you also have the plugin installed, a `--plugin-dir` session runs **both** copies, so every finding is reported twice. Disable the installed one while developing: `claude plugin disable shift-left-guard`.
 
 Rules live in [`hooks/rules.ts`](hooks/rules.ts): one object per rule (`id`, `kind`, `severity`, `title`, `fix`, and a `line` or `file` matcher). PRs with new rules and a test welcome. Run `bun run build` after changing rules so the pre-commit scanner matches.
 
