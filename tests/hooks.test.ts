@@ -11,7 +11,7 @@ const fakeDisk = (on: On, files: Record<string, string> = {}) => {
   mock.store(on)
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.render', ($, e) => h($.ui.resolve(e).Box, null))
+  on('ui.render', ($, e) => h($.ui.resolve(e).Box, null) as never)
   on('fs.read', ($, e) => {
     const text = e.path.endsWith('/bin/guard-scan.mjs') ? '// scanner' : files[e.path]
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text }
@@ -108,6 +108,67 @@ describe('cloud guard', () => {
   })
 })
 
+/** Answers the guard's dialog as the user would. */
+const answerDialog = (on: On, label: string) => {
+  const asked: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
+    const question = e.questions[0]!.question
+    asked.push(question)
+    return { result: { questions: e.questions, answers: { [question]: label } } as never }
+  })
+  return asked
+}
+
+describe('blast-radius dialog', () => {
+  test('names the target, and an approval is not asked again by the permission check', async ($, on) => {
+    fakeDisk(on)
+    const asked = answerDialog(on, 'Run it')
+    on('tool.check', () => ({ decision: 'allow' }))
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } as never }))
+    const command = 'gcloud sql instances delete db --project=acme-prod'
+    const r = await $.tool.call({ tool: 'Bash', command, tool_use_id: 'tu-1' } as never)
+    expect(asked[0]).toContain('PRODUCTION')
+    expect(asked[0]).toContain('project: acme-prod')
+    expect(r.deny).toBeUndefined()
+    const approved = await $.tool.check({ tool: 'Bash', input: { command }, tool_use_id: 'tu-1' } as never)
+    expect(approved.decision).toBe('allow')
+    const other = await $.tool.check({ tool: 'Bash', input: { command }, tool_use_id: 'tu-2' } as never)
+    expect(other.decision).toBe('ask')
+  })
+
+  test('a declined command never runs', async ($, on) => {
+    fakeDisk(on)
+    answerDialog(on, 'Cancel')
+    let ran = 0
+    on('tool.call', { tool: 'Bash' }, () => {
+      ran += 1
+      return { result: { stdout: '', stderr: '', interrupted: false } as never }
+    })
+    const r = await $.tool.call(bash('terraform destroy -auto-approve'))
+    expect(r.deny ?? r.text ?? '').toContain('declined')
+    expect(ran).toBe(0)
+  })
+})
+
+describe('transcript row', () => {
+  test('marks a blocked and a clean write on every surface', async ($, on) => {
+    fakeDisk(on)
+    on('ui.render', { component: 'ToolUse' }, ($, e) => h($.ui.resolve(e).Text, null, `Write(${e.props.tool})`) as never)
+    await $.tool.call({ tool: 'Write', file_path: WORKFLOW, content: UNSAFE, tool_use_id: 'tu-bad' } as never)
+    await $.tool.call({ tool: 'Write', file_path: '/repo/README.md', content: 'hi', tool_use_id: 'tu-ok' } as never)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const row = (id: string) =>
+        $.ui.mount({ plugin: 'shift-left-guard', surface, component: 'ToolUse', props: { tool_use_id: id, tool: 'Write' } as never })
+      const bad = await row('tu-bad')
+      expect(await bad.find({ type: 'Text', text: /blocked GHA003/ })).toBeDefined()
+      await bad.unmount()
+      const ok = await row('tu-ok')
+      expect(await ok.find({ type: 'Text', text: /clean/ })).toBeDefined()
+      await ok.unmount()
+    }
+  })
+})
+
 describe('band', () => {
   test('shows the last interception on every surface', async ($, on) => {
     fakeDisk(on)
@@ -124,6 +185,8 @@ describe('band', () => {
       expect(await ui.find({ type: 'Text', text: /blocked/ })).toBeUndefined()
       await $.tool.call({ tool: 'Write', file_path: WORKFLOW, content: SAFE })
       expect(await ui.find({ type: 'Text', text: /Claude fixed GHA003/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /- .*run: echo "\$\{\{ github\.event\.issue\.title/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /\+ .*T: \$\{\{ github\.event\.issue\.title/ })).toBeDefined()
       await ui.unmount()
     }
   })

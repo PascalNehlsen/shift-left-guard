@@ -90,9 +90,11 @@ Then run `/reload-plugins` in an open session, or start a new one. To stay on a 
 | **Block → fix loop** | Findings at or above `blockAt` (default `high`) stop the write, and Claude gets each finding with a concrete fix. If the same findings come back after 2 retries, the write goes through with a loud warning, so the guard never deadlocks a session. |
 | **Shell guard** | After every Bash command, files git sees as changed since the command started are scanned against `HEAD`. This catches `sed -i`, `cat > file`, heredocs and generators. Claude gets the findings in the same step and must fix them first. |
 | **Warnings** | Lower-severity findings pass, and Claude gets them as a note after the write. |
-| **Cloud guard** | Bash commands like `terraform destroy`, `apply -auto-approve`, `gcloud … delete`, `aws … delete-*`, `aws s3 rm --recursive`, `az … delete`, `kubectl delete ns`, `helm uninstall` and owner/admin IAM grants are put to you (`ask`) or refused (`deny`). Production targets are flagged. |
+| **Cloud guard** | Bash commands like `terraform destroy`, `apply -auto-approve`, `gcloud … delete`, `aws … delete-*`, `aws s3 rm --recursive`, `az … delete`, `kubectl delete ns`, `helm uninstall` and owner/admin IAM grants are put to you (`ask`) or refused (`deny`). With `ask` you get a **blast-radius dialog**: the command, the project, region, namespace or bucket it hits, whether it targets production, and what undoing it takes. |
 | **Pre-commit hook** | `/guard install-hook` installs a git hook with the same rules into the current repo. It covers your own edits too, with no Claude involved. |
-| **Band, pane, status line** | A line above the prompt shows the last interception, with **[Report]** (opens the findings pane: every finding with its fix) and **[Hide]**. The status line keeps a running score. |
+| **Band, pane, status line** | A line above the prompt shows the last interception, with **[Report]** (opens the findings pane: every finding with its fix) and **[Hide]**. When Claude fixes a finding, the band shows the **before/after diff** of the lines it changed. The status line keeps a running score. |
+| **🛡 on the transcript row** | Every `Write`/`Edit` Claude makes carries a mark on its row: `🛡 clean`, `🛡 blocked GHA003`, `🛡 fixed GHA003`. Shell commands that wrote an issue and cloud commands are marked too. |
+| **Learning mode** | Turn on `explain` and every finding comes with *why* it is dangerous, its CWE and a real incident, in the pane and for Claude, who then explains it to you in its reply. Made for learners and teams new to DevSecOps. |
 
 > [!IMPORTANT]
 > **Write/Edit are checked before the file is written. Shell commands can only be checked after.** A shell command's output is not known until it has run, so the shell guard cannot refuse the write. It flags it immediately and makes Claude fix it in the same step. The pre-commit hook is the backstop for anything that still slips through.
@@ -231,9 +233,10 @@ Put a `.guard.json` in the repository root to add your own rules or switch built
 |---|---|---|
 | `blockAt` | `critical` · `high` · `medium` · `low` · `never` | `high` |
 | `cloudGuard` | `ask` · `deny` · `off` | `ask` |
+| `explain` | `true` · `false` | `false` |
 
 > [!CAUTION]
-> `cloudGuard: ask` hands the decision to your permission mode. In **auto mode the classifier decides, not you**. Use `deny` if a human must always run these commands; Claude then shows you the command to run with `! <command>`.
+> `cloudGuard: ask` shows you the blast-radius dialog, in every permission mode, auto mode included. Where no one can answer it (`claude -p`, the SDK) or you dismiss it, the decision falls back to your permission mode, and **in auto mode the classifier decides, not you**. Use `deny` if a human must always run these commands; Claude then shows you the command to run with `! <command>`.
 
 ## CI
 
