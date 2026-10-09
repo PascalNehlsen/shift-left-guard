@@ -5,13 +5,14 @@
 //   node guard-scan.mjs --block-at=medium
 //   node guard-scan.mjs --all --format=sarif > guard.sarif   for GitHub code scanning
 //   node guard-scan.mjs --all --badge     also print the README badge for the score
+//   node guard-scan.mjs --all --badge-file  write .github/shift-left-guard.json for the live badge
 // Exits 1 when a finding at or above --block-at (default high) is found.
 // Reads the repository's .guard.json (team rules, disabled rules) like the mod does.
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 import type { Finding, Severity } from '../types'
-import { CONFIG_FILE, RULES, badgeMarkdown, envFinding, formatFindings, introduced, isEnvFile, parseConfig, rank, scan, scoreOf } from '../hooks/rules'
+import { BADGE_FILE, CONFIG_FILE, RULES, badgeJson, badgeMarkdown, envFinding, envHasSecrets, formatFindings, introduced, isEnvFile, parseConfig, rank, scan, scoreOf } from '../hooks/rules'
 
 const args = process.argv.slice(2)
 const paths = args.filter(a => !a.startsWith('--'))
@@ -63,8 +64,9 @@ for (const path of files) {
   const after = isAll ? readFile(path) : git('show', `:${path}`)
   if (after === undefined || !isText(after)) continue
   const found: Finding[] = isAll ? scan(path, after, config) : introduced(scan(path, git('show', `HEAD:${path}`) ?? '', config), scan(path, after, config))
-  // A listed env file is tracked or staged, so it is on its way into the repository.
-  if (isEnvFile(path) && !config.disabled.has('SEC004')) found.unshift(envFinding(path))
+  // A staged env file is on its way into the repository. A tracked one is only
+  // worth flagging when it holds what looks like a real secret, not dev defaults.
+  if (isEnvFile(path) && !config.disabled.has('SEC004') && (!isAll || envHasSecrets(after))) found.unshift(envFinding(path))
   if (found.length === 0) continue
   const stop = found.filter(f => rank(f.severity) >= rank(blockAt))
   blocking += stop.length
@@ -124,6 +126,11 @@ if (isAll) {
   const { score, grade } = scoreOf(results.map(r => r.finding))
   console.log(color(grade <= 'B' ? 32 : grade === 'C' ? 33 : 31, `🛡 Security score: ${score}/100 · grade ${grade}`))
   if (args.includes('--badge')) console.log(badgeMarkdown(grade))
+  if (args.includes('--badge-file') && top !== undefined) {
+    mkdirSync(`${top}/.github`, { recursive: true })
+    writeFileSync(`${top}/${BADGE_FILE}`, badgeJson(score, grade))
+    console.log(`Wrote ${BADGE_FILE}`)
+  }
 }
 
 if (blocking > 0) {

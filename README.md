@@ -4,12 +4,12 @@
   <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/zizmor.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/zizmor.yml/badge.svg" alt="zizmor"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://github.com/PascalNehlsen/shift-left-guard"><img src="https://img.shields.io/badge/shift--left--guard-A-brightgreen" alt="shift-left-guard: A"></a>
+  <a href="https://github.com/PascalNehlsen/shift-left-guard"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FPascalNehlsen%2Fshift-left-guard%2Fmain%2F.github%2Fshift-left-guard.json" alt="shift-left-guard score"></a>
 </p>
 
 **DevSecOps guardrails for Claude Code.** Every GitHub Actions workflow, Dockerfile, Terraform file, Kubernetes manifest, Compose file, `package.json`, agent config (`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`) and secret that Claude writes is checked *before* it hits your disk. When something is wrong, Claude gets the findings and fixes them itself. Destructive cloud commands come to you before they run.
 
-![Shift-Left Guard blocking a script injection and Claude fixing it](docs/demo.gif)
+![Shift-Left Guard catching a script injection Claude copied from a template, Claude fixing it, a /guard audit, and the blast-radius dialog stopping a production delete](docs/demo.gif)
 
 CI scanners find these problems after the push. Shift-Left Guard stops them while the code is still being written.
 
@@ -92,7 +92,7 @@ Then run `/reload-plugins` in an open session, or start a new one. To stay on a 
 | **Shell guard** | After every Bash command, files git sees as changed since the command started are scanned against `HEAD`. This catches `sed -i`, `cat > file`, heredocs and generators. Claude gets the findings in the same step and must fix them first. |
 | **Warnings** | Lower-severity findings pass, and Claude gets them as a note after the write. |
 | **Cloud guard** | Bash commands like `terraform destroy`, `apply -auto-approve`, `gcloud … delete`, `aws … delete-*`, `aws s3 rm --recursive`, `az … delete`, `kubectl delete ns`, `helm uninstall` and owner/admin IAM grants are put to you (`ask`) or refused (`deny`). With `ask` you get a **blast-radius dialog**: the command, the project, region, namespace or bucket it hits, whether it targets production, and what undoing it takes. |
-| **Audit & score** | `/guard audit` scans the whole repository and gives it a **security score and grade (A–F)** with the top findings. `/guard fix` puts a fix request for all of them into your prompt (or press **Fix with Claude** in the pane); `/guard badge` prints a README badge for the grade. |
+| **Audit & score** | `/guard audit` scans the whole repository and gives it a **security score and grade (A–F)** with the top findings. `/guard fix` puts a fix request for all of them into your prompt (or press **Fix with Claude** in the pane); `/guard badge` writes `.github/shift-left-guard.json` and prints a **live** README badge that reads it, so each committed audit updates the badge. |
 | **Weekly recap** | Once a week, at your first session, a toast says what the guard did last week: issues stopped, fixed by Claude, cloud commands checked. |
 | **Pre-commit hook** | `/guard install-hook` installs a git hook with the same rules into the current repo. It covers your own edits too, with no Claude involved. |
 | **Band, pane, status line** | A line above the prompt shows the last interception, with **[Report]** (opens the findings pane: every finding with its fix) and **[Hide]**. When Claude fixes a finding, the band shows the **before/after diff** of the lines it changed. The status line keeps a running score. |
@@ -109,7 +109,7 @@ Then run `/reload-plugins` in an open session, or start a new one. To stay on a 
 | `/guard` | Session + all-time report |
 | `/guard audit` | Scan the whole repository: score, grade and top findings |
 | `/guard fix` | Put a fix request for the audit's findings into your prompt; press Enter to send |
-| `/guard badge` | README badge for the last audit's grade |
+| `/guard badge` | Live README badge for the audit's grade (writes `.github/shift-left-guard.json`; commit it) |
 | `/guard pane` | Open the findings pane (same as the **[Report]** button) |
 | `/guard rules` | List all rules with severity |
 | `/guard install-hook` | Install the pre-commit hook in the current repo |
@@ -139,7 +139,7 @@ Only the changed file is scanned, and only what the change introduces is reporte
 
 | File | Rule set |
 |---|---|
-| `.github/workflows/*.yml`, `action.yml` | GHA |
+| `.github/workflows/*.yml`, `action.yml`, and any YAML with `on:` + `jobs:` + `runs-on:` (workflow templates) | GHA |
 | `Dockerfile*`, `*.dockerfile`, `Containerfile` | DKR |
 | `*.tf` | TF |
 | Kubernetes manifests, Helm `charts/**/values*.yaml` | K8S |
@@ -178,11 +178,11 @@ Only the changed file is scanned, and only what the change introduces is reporte
 | CMP001 | high | Compose: `privileged: true` |
 | CMP002 | critical | Compose: Docker socket mounted into a container |
 | CMP003 | medium | Compose: `network_mode`/`pid`/`ipc: host` |
-| CMP004 | high | Compose: literal secret in `environment:` (skips `${VAR}`, `*_FILE`) |
+| CMP004 | medium | Compose: literal secret in `environment:` (skips `${VAR}`, `*_FILE`, placeholders like `changeme`/`postgres`, and `e2e/`, `examples/`, `.devcontainer/` files) |
 | CMP005 | low | Compose: image `:latest` or untagged |
 | NPM001 | high | `package.json` install script fetches or evals code (`curl`, `\| sh`, `node -e`, `base64 -d`) |
-| NPM002 | medium | Dependency from a git/HTTP URL not pinned to a commit SHA |
-| NPM003 | low | Dependency on `*` or `latest` |
+| NPM002 | medium | Dependency from a git/HTTP URL not pinned to a commit SHA (dependency blocks only) |
+| NPM003 | low | Dependency on `*` or `latest` (skips workspaces, same-scope siblings, peer/optional ranges) |
 | AGT001 | high | Agent may run any shell command: `Bash`, `Bash(*)`, `*` in `allow`, or `defaultMode: bypassPermissions` |
 | AGT002 | medium | `disableAllHooks` or `enableAllProjectMcpServers` switched on |
 | AGT003 | medium | MCP server started with an unpinned `npx`/`bunx`/`pnpm dlx`/`uvx`/`pipx run` package |
@@ -193,7 +193,7 @@ Only the changed file is scanned, and only what the change introduces is reporte
 | AGT008 | high | `.guard.json` switches built-in rules off |
 | SEC001 | critical | Private keys with key material (any file; a bare header in docs is ignored) |
 | SEC002 | critical | AWS, GCP API, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI keys (any file) |
-| SEC003 | high | Hidden bidi or Unicode tag characters, "Trojan Source" (any file) |
+| SEC003 | high | Hidden bidi overrides/isolates or Unicode tag characters, "Trojan Source" (any file; translation files and flag emoji are fine) |
 | SEC004 | high | New `.env` file that git does not ignore (templates like `.env.example` are fine) |
 
 `allUsers` on `roles/run.invoker` / `roles/cloudfunctions.invoker` is allowed, because that is how a public Cloud Run service is exposed.
@@ -255,7 +255,7 @@ The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](b
 
 Pin the tag (or a commit SHA) rather than `main`, so a new release never changes your pipeline unreviewed.
 
-`--all` audits every tracked file and prints the security score; add `--badge` for the README badge. Without `--all`, the script scans staged changes only (pre-commit mode).
+`--all` audits every tracked file and prints the security score; `--badge` prints a README badge, `--badge-file` writes `.github/shift-left-guard.json` for the live badge. Without `--all`, the script scans staged changes only (pre-commit mode).
 
 The score is 100 minus 25 per critical, 10 per high, 3 per medium and 1 per low finding: A ≥ 90, B ≥ 75, C ≥ 60, D ≥ 40, else F.
 

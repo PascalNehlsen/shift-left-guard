@@ -7,10 +7,14 @@ import {
   EXPLAIN,
   RULES,
   applyEdit,
+  BADGE_FILE,
+  badgeFileUrl,
+  badgeJson,
   badgeMarkdown,
   blastRadius,
   destructive,
   envFinding,
+  envHasSecrets,
   formatFindings,
   introduced,
   isEnvFile,
@@ -64,11 +68,20 @@ const windowAt = (text: string, line: number) => text.split(/\r?\n/).slice(Math.
  */
 const diffOf = (id: string, blocked: readonly string[] | undefined, line: number | undefined, fixed: string) => {
   if (blocked === undefined || line === undefined) return undefined
-  const now = fixed.split(/\r?\n/).slice(Math.max(0, line - 1 - DIFF_CONTEXT - 2), line + DIFF_CONTEXT + 2)
-  const show = (l: string) => shown({ id, snippet: l.trim() }).slice(0, 120)
-  const minus = blocked.filter(l => l.trim() !== '' && !now.includes(l)).slice(0, 3).map(show)
-  const plus = now.filter(l => l.trim() !== '' && !blocked.includes(l)).slice(0, 3).map(show)
-  return minus.length + plus.length === 0 ? undefined : { minus, plus }
+  // The fix may add or remove lines above the finding, so compare against a wider
+  // stretch of the fixed file than the stretch that was blocked.
+  const all = fixed.split(/\r?\n/)
+  const near = (l: string, lines: readonly string[]) => lines.some(n => n.trimEnd() === l.trimEnd())
+  const wide = all.slice(Math.max(0, line - 1 - 3 * DIFF_CONTEXT), line + 3 * DIFF_CONTEXT)
+  const minus = blocked.filter(l => l.trim() !== '' && !near(l, wide)).slice(0, 3)
+  const anchor = all.findIndex((l, i) => i >= line - 1 - 3 * DIFF_CONTEXT && near(l, blocked) && !near(l, minus))
+  const start = Math.max(0, (anchor < 0 ? line - 1 - DIFF_CONTEXT : anchor))
+  const plus = all.slice(start, start + 2 * DIFF_CONTEXT + 4).filter(l => l.trim() !== '' && !near(l, blocked)).slice(0, 3)
+  if (minus.length + plus.length === 0) return undefined
+  // Keep the lines' shape (YAML indentation matters), minus the indent they share.
+  const indent = Math.min(...[...minus, ...plus].map(l => l.length - l.trimStart().length))
+  const show = (l: string) => shown({ id, snippet: l.slice(indent).trimEnd() }).slice(0, 120)
+  return { minus: minus.map(show), plus: plus.map(show) }
 }
 
 const lessonFor = (opts: Opts) =>
@@ -353,17 +366,18 @@ async function checkShellWrites(
 async function runAudit($: $): Promise<Audit | string> {
   const top = (await git($, ['rev-parse', '--show-toplevel']))?.trim()
   if (!top) return 'Not inside a git repository.'
-  const listed = await git($, ['ls-files', '-z'], top)
+  // Tracked files and new ones git does not ignore: what the next commit could hold.
+  const listed = await git($, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], top)
   if (listed === undefined) return 'Could not list the files of this repository.'
   const config = await configOf($, top)
-  const paths = listed.split('\0').filter(Boolean)
+  const paths = [...new Set(listed.split('\0').filter(Boolean))]
   const found: AuditFinding[] = []
   let scanned = 0
   for (const rel of paths.slice(0, MAX_AUDIT_FILES)) {
     const path = `${top}/${rel}`
-    if (isEnvFile(path) && !config.disabled.has('SEC004')) found.push({ path: rel, ...briefOne(envFinding(path)) })
     const text = await $.fs.read(path).catch(() => undefined)
     if (text === undefined || text.length > MAX_FILE_BYTES || text.includes('\0')) continue
+    if (isEnvFile(path) && !config.disabled.has('SEC004') && envHasSecrets(text)) found.push({ path: rel, ...briefOne(envFinding(path)) })
     scanned += 1
     found.push(...scan(path, text, config).map(f => ({ path: rel, ...briefOne(f) })))
   }
@@ -383,6 +397,21 @@ async function runAudit($: $): Promise<Audit | string> {
   }
 }
 
+/** Rewrites the committed badge file, if the repository has one, so the live badge shows this audit. */
+const refreshBadgeFile = async ($: $, a: Audit, create = false) => {
+  const path = `${a.top}/${BADGE_FILE}`
+  if (!create && (await $.fs.read(path).catch(() => undefined)) === undefined) return false
+  await $.fs.write(path, badgeJson(a.score, a.grade))
+  return true
+}
+
+/** The live badge's URL: the badge file on the default branch of the GitHub remote. */
+const liveBadgeUrl = async ($: $, top: string) => {
+  const remote = await git($, ['remote', 'get-url', 'origin'], top)
+  const head = (await git($, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], top))?.trim().replace(/^origin\//, '')
+  return remote === undefined ? undefined : badgeFileUrl(remote, head || 'main')
+}
+
 const briefOne = ({ id, severity, title, line }: Finding) => ({ id, severity, title, line })
 
 const auditText = (a: Audit) =>
@@ -396,7 +425,7 @@ const auditText = (a: Audit) =>
           'Top findings:',
           ...a.findings.slice(0, 8).map(f => `  ${f.severity.padEnd(8)} ${f.id.padEnd(7)} ${f.path}:${f.line}  ${f.title}`),
           '',
-          'Let Claude fix them: /guard fix (puts the request in your prompt; press Enter to send). Badge: /guard badge',
+          'Let Claude fix them: /guard fix (puts the request in your prompt; press Enter to send). Details: /guard pane · Badge: /guard badge',
         ]),
   ].join('\n')
 
@@ -596,8 +625,8 @@ export const register: Register = (on, options) => {
       const result = await runAudit($)
       if (typeof result === 'string') return { text: result }
       await update($, audit, () => result)
-      await $.ui.open({ id: PANE, title: 'Shift-Left Guard' }).catch(() => undefined)
-      return { text: auditText(result) }
+      const isBadgeUpdated = await refreshBadgeFile($, result).catch(() => false)
+      return { text: `${auditText(result)}${isBadgeUpdated ? `\n\nBadge updated: ${BADGE_FILE} (commit it to publish).` : ''}` }
     }
 
     if (arg === 'fix' || arg === 'badge') {
@@ -605,8 +634,21 @@ export const register: Register = (on, options) => {
       if (typeof last === 'string') return { text: last }
       await update($, audit, () => last)
       if (arg === 'badge') {
+        const url = await liveBadgeUrl($, last.top)
+        if (url === undefined) {
+          return {
+            text: [`Grade ${last.grade} (${last.score}/100). Add this to your README:`, '', badgeMarkdown(last.grade), '', 'This badge is a fixed image: run /guard badge again after fixes.'].join('\n'),
+          }
+        }
+        await refreshBadgeFile($, last, true)
         return {
-          text: [`Grade ${last.grade} (${last.score}/100). Add this to your README:`, '', badgeMarkdown(last.grade), '', 'Run /guard audit again after fixes to update it.'].join('\n'),
+          text: [
+            `Grade ${last.grade} (${last.score}/100). Wrote ${BADGE_FILE}; commit it, then add this to your README:`,
+            '',
+            badgeMarkdown(last.grade, url),
+            '',
+            `The badge reads ${BADGE_FILE} from your default branch, so every /guard audit (or \`guard-scan --all --badge-file\` in CI) that you commit updates it.`,
+          ].join('\n'),
         }
       }
       if (last.findings.length === 0) return { text: 'The last audit found nothing to fix.' }
@@ -676,20 +718,26 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box>
-          <Text bold>🛡 Shift-Left Guard </Text>
-          <Text color={color}>{text} </Text>
+          <Box flexShrink={0}>
+            <Text bold>🛡 Shift-Left Guard </Text>
+          </Box>
+          <Box flexShrink={1}>
+            <Text color={color} wrap="truncate-end">
+              {text}{' '}
+            </Text>
+          </Box>
           <Button key="report" label="Report" onPress={() => $.ui.open({ id: PANE, title: 'Shift-Left Guard' })} />
           <Text> </Text>
           <Button key="hide" label="Hide" onPress={() => update($, isBandHidden, () => true)} />
         </Box>
         {diff?.minus.map((l, i) => (
-          <Text key={`m${i}`} color="red">
+          <Text key={`m${i}`} color="red" wrap="truncate-end">
             {'   - '}
             {l}
           </Text>
         ))}
         {diff?.plus.map((l, i) => (
-          <Text key={`p${i}`} color="green">
+          <Text key={`p${i}`} color="green" wrap="truncate-end">
             {'   + '}
             {l}
           </Text>
@@ -704,11 +752,12 @@ export const register: Register = (on, options) => {
     const { Box, Text } = $.ui.resolve(e)
     const ids = verdict.ids.join(', ')
     const [color, label] = BADGE[verdict.action as Verdict](ids)
+    // Under the row, like the engine's own result line: beside it, a long row would push the mark off the edge.
     return (
-      <Box>
+      <Box flexDirection="column">
         {await next(e)}
         <Text color={color} dimColor={verdict.action === 'clean'}>
-          {'  🛡 '}
+          {'  ⎿  🛡 '}
           {label}
         </Text>
       </Box>

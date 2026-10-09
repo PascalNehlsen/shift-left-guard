@@ -34,7 +34,7 @@ export type Rule = {
   file?: (lines: readonly string[]) => number
 }
 
-type LineContext = { inRunBlock: boolean; text: string; lines: readonly string[]; index: number }
+type LineContext = { inRunBlock: boolean; text: string; lines: readonly string[]; index: number; path: string }
 
 /**
  * The HCL block a line sits in: its header line and its whole body, found by
@@ -109,6 +109,34 @@ const nearestKey = (lines: readonly string[], index: number, keys: RegExp) => {
   return undefined
 }
 
+/** Whether the YAML mapping a line sits in (its siblings, same indent) has a key matching `re`. */
+const hasSibling = (ctx: LineContext, re: RegExp) => {
+  const line = ctx.lines[ctx.index] ?? ''
+  const indent = line.length - line.trimStart().length
+  const inBlock = (l: string) => l.trim() === '' || l.length - l.trimStart().length >= indent
+  for (let i = ctx.index - 1; i >= 0 && inBlock(ctx.lines[i] ?? ''); i--) if (re.test(ctx.lines[i] ?? '')) return true
+  for (let i = ctx.index + 1; i < ctx.lines.length && inBlock(ctx.lines[i] ?? ''); i++) if (re.test(ctx.lines[i] ?? '')) return true
+  return false
+}
+
+const isSameScope = (scope: string | undefined, text: string) =>
+  scope !== undefined && new RegExp(`^\\s*"name"\\s*:\\s*"${scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`, 'm').test(text)
+
+/** The key of the JSON object a line sits in, found by brace balance above it. */
+const enclosingKey = (lines: readonly string[], index: number) => {
+  let depth = 0
+  for (let i = index - 1; i >= 0; i--) {
+    const l = lines[i] ?? ''
+    depth += (l.match(/\}/g)?.length ?? 0) - (l.match(/\{/g)?.length ?? 0)
+    if (depth < 0) return /"([^"]+)"\s*:\s*\{/.exec(l)?.[1]
+  }
+  return undefined
+}
+
+const DEPENDENCY_BLOCKS = new Set(['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'overrides', 'resolutions'])
+const inDependencies = (ctx: LineContext, blocks: ReadonlySet<string> = DEPENDENCY_BLOCKS) =>
+  blocks.has(enclosingKey(ctx.lines, ctx.index) ?? '')
+
 /** Commands that fetch and run a package: the package argument, if any. */
 const LAUNCHERS: Record<string, (args: readonly string[]) => string | undefined> = {
   npx: args => args.find(a => !a.startsWith('-')),
@@ -147,13 +175,26 @@ const unpinnedServers = (text: string): string[] => {
   return found
 }
 
-/** Bidi overrides and Unicode tag characters: text that reads differently than it runs (Trojan Source). */
-const TROJAN = /[\u202A-\u202E\u2066-\u2069]|\uDB40[\uDC00-\uDC7F]/
+/**
+ * Bidi overrides and isolates, and Unicode tag characters: text that reads
+ * differently than it runs (Trojan Source). The embeddings RTL text uses
+ * (U+202A-202C) are left alone, and so are the tags inside a flag emoji.
+ */
+const TROJAN = /[\u202D\u202E\u2066-\u2068]|\uDB40[\uDC00-\uDC7F]/
+const FLAG_TAGS = /\u{1F3F4}[\u{E0020}-\u{E007E}]+\u{E007F}/gu
+/** Translation files, where bidi controls are part of the language. */
+const LOCALE_FILE = /(^|[\\/])(locales?|i18n|translations?|lang)[\\/]|\.(po|pot|xliff?|strings|arb)$/
+
+/** Values that stand in for a secret in examples and local setups. */
+const PLACEHOLDER =
+  /^(change[-_]?me|password|passw0rd|postgres|mysql|mariadb|root|admin|secret|test|testing|example|dev|development|local|default|guest|user|pass|todo|tbd|replace[-_]?me|your[-_].*|x+|\*+|<[^>]*>)$/i
+/** Paths of examples, tests and dev containers: their secrets are placeholders by design. */
+const EXAMPLE_PATH = /(^|[\\/])(e2e|tests?|__tests__|examples?|samples?|fixtures?|\.devcontainer|benchmarks?|demo)[\\/]|\.(example|sample)\.[\w.]+$/i
 /** Invisible characters with no business in an instruction file (the emoji joiner U+200D is left alone). */
 const INVISIBLE = /[\u200B\u200C\u2060\u180E]|(?!^)\uFEFF/
 
 const INJECTION =
-  /\b(ignore|disregard|forget)\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions|rules|prompts?)\b|\bdo\s+not\s+(tell|inform|show|mention\s+(this|it)\s+to)\s+the\s+user\b|\b(disable|turn\s+off|bypass|skip)\s+(the\s+)?(shift-left-guard|guard|hooks|sandbox|permission\s+(checks|prompts))\b|--dangerously-skip-permissions/i
+  /\b(ignore|disregard|forget)\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions|rules|prompts?)\b|\b(do\s+not|don't|never)\s+(tell|inform|show|mention\s+(this|it)\s+to)\s+the\s+user\s+(about|what\s+you|that\s+you|you)\b|\b(disable|turn\s+off|bypass|skip)\s+(the\s+)?(shift-left-guard|security\s+guard|all\s+hooks|sandbox(ing)?|permission\s+(checks|prompts))\b|--dangerously-skip-permissions/i
 
 /** `allUsers` as Cloud Run / Functions invoker is how a public service is meant to be exposed. */
 const isPublicInvoker = (line: string, ctx: LineContext) =>
@@ -440,13 +481,17 @@ export const RULES: readonly Rule[] = [
   {
     id: 'CMP004',
     kind: 'compose',
-    severity: 'high',
+    // Mostly local dev defaults in practice; real token formats are SEC002 (critical) anyway.
+    severity: 'medium',
     title: 'Secret written into the compose file',
     fix: 'Read it from the environment (`PASSWORD: ${DB_PASSWORD}` with a git-ignored `.env`) or use Compose `secrets:`.',
-    line: line => {
+    line: (line, ctx) => {
+      if (EXAMPLE_PATH.test(ctx.path)) return false
       const m = /^\s*-?\s*['"]?(\w+)['"]?\s*[=:]\s*['"]?([^'"#\s][^'"#]*)['"]?\s*$/.exec(line)
       const [name, value] = [m?.[1] ?? '', m?.[2]?.trim() ?? '']
-      return SECRET_NAME.test(name) && value.length >= 4 && !value.includes('${') && !isReference(name, value)
+      return (
+        SECRET_NAME.test(name) && value.length >= 4 && !value.includes('${') && !PLACEHOLDER.test(value) && !isReference(name, value)
+      )
     },
   },
   {
@@ -455,7 +500,7 @@ export const RULES: readonly Rule[] = [
     severity: 'low',
     title: 'Image not pinned (:latest or no tag)',
     fix: 'Pin an explicit version tag or digest so every `docker compose up` runs the same image.',
-    line: line => isUnpinnedImage(/^\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1]),
+    line: (line, ctx) => isUnpinnedImage(/^\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1]) && !hasSibling(ctx, /^\s*build:/),
   },
 
   // package.json
@@ -476,10 +521,9 @@ export const RULES: readonly Rule[] = [
     severity: 'medium',
     title: 'Dependency installed from a git or HTTP URL',
     fix: 'Depend on a published version from the registry. If you must use git, pin a full commit SHA (`github:org/repo#<sha>`) and review it like vendored code.',
-    line: line => {
+    line: (line, ctx) => {
       const m = /^\s*"([^"]+)"\s*:\s*"((?:git\+|git:|github:|gitlab:|bitbucket:|https?:\/\/)[^"]*)"/.exec(line)
-      if (m === null || /^(url|homepage|repository|bugs|funding|\$schema|registry)$/.test(m[1] ?? '')) return false
-      return !/#[0-9a-f]{40}$/.test(m[2] ?? '')
+      return m !== null && inDependencies(ctx) && !/#[0-9a-f]{40}$/.test(m[2] ?? '')
     },
   },
   {
@@ -488,7 +532,13 @@ export const RULES: readonly Rule[] = [
     severity: 'low',
     title: 'Dependency on any version (* or latest)',
     fix: 'Use a semver range (`^1.4.0`) and commit the lockfile, so installs are reproducible.',
-    line: line => /^\s*"[^"]+"\s*:\s*"(\*|latest|x)"\s*,?\s*$/.test(line),
+    // Workspaces link local packages with "*", and peer/optional ranges are meant to be wide.
+    // A package of the same @scope is a monorepo sibling, linked the same way.
+    line: (line, ctx) =>
+      /^\s*"[^"]+"\s*:\s*"(\*|latest|x)"\s*,?\s*$/.test(line) &&
+      !/"workspaces"\s*:/.test(ctx.text) &&
+      !isSameScope(/"(@[^/"]+)\//.exec(line)?.[1], ctx.text) &&
+      inDependencies(ctx, new Set(['dependencies', 'devDependencies'])),
   },
 
   // Agent configuration: Claude Code settings, MCP servers, plugin hooks
@@ -611,7 +661,7 @@ export const RULES: readonly Rule[] = [
     severity: 'high',
     title: 'Hidden bidirectional or tag characters (Trojan Source)',
     fix: 'Remove the invisible Unicode controls: they make code or prompts read differently than they run (CVE-2021-42574). Retype the line.',
-    line: line => TROJAN.test(line),
+    line: (line, ctx) => !LOCALE_FILE.test(ctx.path) && TROJAN.test(line.replace(FLAG_TAGS, '')),
   },
   {
     id: 'SEC004',
@@ -626,8 +676,30 @@ export const RULES: readonly Rule[] = [
 /** `.env`, `.env.local`, `prod.env`; not the templates that are meant to be committed. */
 export const isEnvFile = (path: string) => {
   const name = base(path)
-  return /^\.env(\..+)?$|\.env$/.test(name) && !/\.(example|sample|template|dist|defaults)$|^\.envrc$/.test(name)
+  return (
+    /^\.env(\..+)?$|\.env$/.test(name) &&
+    !/\.(example|sample|template|dist|defaults|patch|schema)$|^\.envrc$|^(example|sample|template)[._-]/i.test(name)
+  )
 }
+
+/**
+ * Whether an env file holds a value that looks like a real secret: a
+ * secret-named key with a literal that is no placeholder. A committed env
+ * file of dev defaults is common; one with real credentials is the leak.
+ */
+export const envHasSecrets = (text: string) =>
+  text.split(/\r?\n/).some(line => {
+    const m = /^\s*(?:export\s+)?(\w+)\s*=\s*['"]?([^'"#\s]*)/.exec(line)
+    const [name, value] = [m?.[1] ?? '', m?.[2] ?? '']
+    return (
+      SECRET_NAME.test(name) &&
+      value.length >= 8 &&
+      !value.includes('$') &&
+      !PLACEHOLDER.test(value) &&
+      !/(DO_NOT_USE|INSECURE|CHANGE|EXAMPLE|DUMMY|FAKE|LOCAL|DEV)/i.test(value) &&
+      !isReference(name, value)
+    )
+  })
 
 export const envFinding = (path: string): Finding => {
   const rule = RULES.find(r => r.id === 'SEC004')!
@@ -652,6 +724,8 @@ export const classify = (path: string, text: string): FileKind => {
   if (AGENT_CONFIG.test(path)) return 'agent'
   if (INSTRUCTIONS.test(path)) return 'instructions'
   if (/\.ya?ml$/.test(name) && /^apiVersion:/m.test(text) && /^kind:/m.test(text)) return 'kubernetes'
+  // Workflow templates kept outside .github/workflows (templates/, workflow-templates/) are workflows too.
+  if (/\.ya?ml$/.test(name) && /^on:/m.test(text) && /^jobs:/m.test(text) && /^\s+runs-on:/m.test(text)) return 'workflow'
   // Helm values carry the same securityContext and image keys the manifests do.
   if (/(^|[\\/])values(\.[\w-]+)?\.ya?ml$/.test(path) && /(^|[\\/])(charts?|helm)[\\/]/.test(path)) return 'kubernetes'
   return 'other'
@@ -759,7 +833,7 @@ export const scan = (path: string, text: string, config: GuardConfig = NO_CONFIG
       else runIndent = -1
     }
     for (const rule of rules) {
-      const hit = rule.line?.(line, { inRunBlock, text, lines, index })
+      const hit = rule.line?.(line, { inRunBlock, text, lines, index, path })
       if (hit) add(rule, index, hit === true ? rule.severity : hit)
     }
   })
@@ -931,9 +1005,29 @@ export const scoreOf = (findings: readonly Pick<Finding, 'severity'>[]): { score
 
 const GRADE_COLOR: Record<Grade, string> = { A: 'brightgreen', B: 'green', C: 'yellow', D: 'orange', F: 'red' }
 
-/** A README badge for a grade, linking to the guard. */
-export const badgeMarkdown = (grade: Grade) =>
-  `[![shift-left-guard: ${grade}](https://img.shields.io/badge/shift--left--guard-${grade}-${GRADE_COLOR[grade]})](https://github.com/PascalNehlsen/shift-left-guard)`
+const GUARD_URL = 'https://github.com/PascalNehlsen/shift-left-guard'
+
+/** Where the live badge's data lives in a repository. */
+export const BADGE_FILE = '.github/shift-left-guard.json'
+
+/** The badge data in shields.io's endpoint format: committed, so the badge follows each audit. */
+export const badgeJson = (score: number, grade: Grade) =>
+  `${JSON.stringify({ schemaVersion: 1, label: 'shift-left-guard', message: `${grade} · ${score}/100`, color: GRADE_COLOR[grade] }, null, 2)}\n`
+
+/** `https://github.com/o/r.git`, `git@github.com:o/r.git` → raw URL of the badge file on `branch`. */
+export const badgeFileUrl = (remote: string, branch: string) => {
+  const m = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(remote.trim())
+  return m ? `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${branch}/${BADGE_FILE}` : undefined
+}
+
+/**
+ * A README badge for a grade, linking to the guard: live when it can read
+ * the committed badge file, a fixed image of today's grade otherwise.
+ */
+export const badgeMarkdown = (grade: Grade, fileUrl?: string) =>
+  fileUrl === undefined
+    ? `[![shift-left-guard: ${grade}](https://img.shields.io/badge/shift--left--guard-${grade}-${GRADE_COLOR[grade]})](${GUARD_URL})`
+    : `[![shift-left-guard](https://img.shields.io/endpoint?url=${encodeURIComponent(fileUrl)})](${GUARD_URL})`
 
 /** ISO week, `2026-W41`: the key the weekly recap counts under. */
 export const weekOf = (at: number) => {
