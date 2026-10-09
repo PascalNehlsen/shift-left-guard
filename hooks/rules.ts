@@ -1040,3 +1040,29 @@ export const weekOf = (at: number) => {
   return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`
 }
 
+
+/** Programs that only read. A command made of nothing else cannot have written a file. */
+const READ_ONLY = new Set([
+  'ls', 'cat', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'rg', 'ag', 'wc', 'pwd', 'echo', 'printf', 'which', 'type',
+  'file', 'stat', 'du', 'df', 'tree', 'jq', 'yq', 'diff', 'cmp', 'sort', 'uniq', 'cut', 'tr', 'basename', 'dirname',
+  'realpath', 'readlink', 'date', 'whoami', 'id', 'uname', 'env', 'printenv', 'true', 'test', '[', 'nl', 'column',
+])
+const READ_ONLY_GIT = new Set(['status', 'log', 'diff', 'show', 'branch', 'rev-parse', 'ls-files', 'blame', 'remote', 'describe', 'tag'])
+
+/**
+ * Whether a shell command only reads, so the after-command check, which asks
+ * git for every changed file, can be skipped. Conservative: any redirection,
+ * substitution or unknown program counts as a possible write.
+ */
+export const isReadOnlyCommand = (command: string) => {
+  if (/[>`]|\$\(|<\(|\btee\b|\bxargs\b|\bsudo\b/.test(command)) return false
+  return command.split(/&&|\|\||[;|\n]/).every(segment => {
+    const words = segment.trim().split(/\s+/).filter(w => !/^\w+=/.test(w))
+    const [program, sub] = [words[0] ?? '', words[1] ?? '']
+    if (program === '') return true
+    if (program === 'git') return READ_ONLY_GIT.has(sub) && !/\s-(d|D|m|M|-delete|-set-url)\b|\badd\b|\bset-url\b|\brm\b/.test(segment)
+    if (program === 'find') return !/\s-(exec|execdir|ok|delete|fprint\w*)\b/.test(segment)
+    if (program === 'sed') return !/\s(-i|--in-place)/.test(segment)
+    return READ_ONLY.has(program)
+  })
+}

@@ -18,6 +18,7 @@ import {
   formatFindings,
   introduced,
   isEnvFile,
+  isReadOnlyCommand,
   parseConfig,
   rank,
   scan,
@@ -558,6 +559,8 @@ export const register: Register = (on, options) => {
     }
     const startedAt = Date.now()
     const ran = await next(e)
+    // Listing changed files costs 0.2 to 0.5 s in a large repository; a command that only reads cannot have written one.
+    if (isReadOnlyCommand(e.command)) return ran
     return checkShellWrites($, opts, startedAt, ran, e.tool_use_id)
     // The command already ran, so a failing scan hands Claude its result as is.
   }).catch(($, e, next) => next(e))

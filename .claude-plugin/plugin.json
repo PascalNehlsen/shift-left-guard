@@ -1,6 +1,6 @@
 {
   "name": "shift-left-guard",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "DevSecOps guardrails for Claude: scans every workflow, Dockerfile, Terraform, Kubernetes, Compose, package.json, agent config and secret Claude writes, makes it fix the issues itself, scores your repo, and asks before destructive cloud commands.",
   "author": { "name": "Pascal Nehlsen", "url": "https://github.com/PascalNehlsen" },
   "homepage": "https://github.com/PascalNehlsen/shift-left-guard",

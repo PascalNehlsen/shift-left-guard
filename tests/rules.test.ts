@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { EXPLAIN, RULES, applyEdit, badgeFileUrl, badgeJson, badgeMarkdown, envHasSecrets, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, parseConfig, scan, scoreOf, weekOf } from '../hooks/rules'
+import { EXPLAIN, RULES, applyEdit, badgeFileUrl, badgeJson, badgeMarkdown, envHasSecrets, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, isReadOnlyCommand, parseConfig, scan, scoreOf, weekOf } from '../hooks/rules'
 
 const ids = (path: string, text: string) => scan(path, text).map(f => f.id)
 
@@ -569,5 +569,14 @@ describe('live badge', () => {
     expect(badgeFileUrl('https://gitlab.com/acme/api.git', 'main')).toBeUndefined()
     expect(badgeMarkdown('A', url)).toContain('img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com')
     expect(JSON.parse(badgeJson(87, 'B'))).toEqual({ schemaVersion: 1, label: 'shift-left-guard', message: 'B · 87/100', color: 'green' })
+  })
+})
+
+describe('read-only shell commands', () => {
+  test('skips the after-command check only for commands that cannot write', async () => {
+    for (const c of ['ls -la', 'cat a.yml | grep run', 'git status && git diff --stat', 'rg -n TODO src', 'find . -name "*.yml"', 'sed -n 1,20p a', 'FOO=1 grep x y'])
+      expect(isReadOnlyCommand(c)).toBe(true)
+    for (const c of ['cp a b', 'cat > a.yml <<EOF', 'echo x > f', 'sed -i s/a/b/ f', 'find . -delete', 'git checkout main', 'ls | xargs rm', 'cat a | tee b', 'echo $(touch f)', 'npm install', 'git branch -D x', 'git tag -d v1'])
+      expect(isReadOnlyCommand(c)).toBe(false)
   })
 })
