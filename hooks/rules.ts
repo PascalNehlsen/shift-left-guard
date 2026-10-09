@@ -1,15 +1,27 @@
 import type { Finding, Severity } from '../types'
 
-export type FileKind = 'workflow' | 'dockerfile' | 'terraform' | 'kubernetes' | 'other'
+export type FileKind =
+  | 'workflow'
+  | 'dockerfile'
+  | 'terraform'
+  | 'kubernetes'
+  | 'compose'
+  | 'npm'
+  | 'agent'
+  | 'instructions'
+  | 'guard'
+  | 'other'
 
 export const SEVERITIES: readonly Severity[] = ['low', 'medium', 'high', 'critical']
 
 export const rank = (severity: Severity | 'never'): number =>
   severity === 'never' ? Infinity : SEVERITIES.indexOf(severity)
 
-type Rule = {
+export type Rule = {
   id: string
   kind: FileKind | 'any'
+  /** Custom rules: only paths this matches are scanned. */
+  paths?: RegExp
   severity: Severity
   title: string
   fix: string
@@ -79,6 +91,69 @@ const INJECTABLE =
 const SECRET_NAME = /(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)/i
 
 const isComment = (line: string) => /^\s*#/.test(line)
+
+const PIPE_TO_SHELL = /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b/
+
+const isUnpinnedImage = (image: string | undefined) => {
+  if (image === undefined || image.includes('@sha256:') || image.includes('{{') || image.includes('$')) return false
+  const tag = image.split('/').pop()!.split(':')[1]
+  return tag === undefined || tag === 'latest'
+}
+
+/** The nearest `"key":` at or above a line, for JSON rules that care which list a value sits in. */
+const nearestKey = (lines: readonly string[], index: number, keys: RegExp) => {
+  for (let i = index; i >= 0; i--) {
+    const m = keys.exec(lines[i] ?? '')
+    if (m) return m[1]
+  }
+  return undefined
+}
+
+/** Commands that fetch and run a package: the package argument, if any. */
+const LAUNCHERS: Record<string, (args: readonly string[]) => string | undefined> = {
+  npx: args => args.find(a => !a.startsWith('-')),
+  bunx: args => args.find(a => !a.startsWith('-')),
+  'pnpm': args => (args[0] === 'dlx' ? args.slice(1).find(a => !a.startsWith('-')) : undefined),
+  uvx: args => args.find(a => !a.startsWith('-')),
+  pipx: args => (args[0] === 'run' ? args.slice(1).find(a => !a.startsWith('-')) : undefined),
+}
+
+const isPinnedPackage = (launcher: string, pkg: string) =>
+  launcher === 'uvx' || launcher === 'pipx'
+    ? /==|@\d/.test(pkg)
+    : /^(@[^/]+\/)?[^@]+@\d[\w.+-]*$/.test(pkg) || pkg.startsWith('.') || pkg.startsWith('/')
+
+/** MCP servers in a JSON config whose launcher fetches an unpinned package. */
+const unpinnedServers = (text: string): string[] => {
+  let json: unknown
+  try {
+    json = JSON.parse(text)
+  } catch {
+    return []
+  }
+  const found: string[] = []
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (node === null || typeof node !== 'object') return
+    const { command, args } = node as { command?: unknown; args?: unknown }
+    if (typeof command === 'string' && Array.isArray(args)) {
+      const launcher = command.split(/[\\/]/).pop() ?? ''
+      const pkg = LAUNCHERS[launcher]?.(args.filter((a): a is string => typeof a === 'string'))
+      if (pkg !== undefined && !isPinnedPackage(launcher, pkg)) found.push(pkg)
+    }
+    Object.values(node).forEach(walk)
+  }
+  walk(json)
+  return found
+}
+
+/** Bidi overrides and Unicode tag characters: text that reads differently than it runs (Trojan Source). */
+const TROJAN = /[\u202A-\u202E\u2066-\u2069]|\uDB40[\uDC00-\uDC7F]/
+/** Invisible characters with no business in an instruction file (the emoji joiner U+200D is left alone). */
+const INVISIBLE = /[\u200B\u200C\u2060\u180E]|(?!^)\uFEFF/
+
+const INJECTION =
+  /\b(ignore|disregard|forget)\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions|rules|prompts?)\b|\bdo\s+not\s+(tell|inform|show|mention\s+(this|it)\s+to)\s+the\s+user\b|\b(disable|turn\s+off|bypass|skip)\s+(the\s+)?(shift-left-guard|guard|hooks|sandbox|permission\s+(checks|prompts))\b|--dangerously-skip-permissions/i
 
 /** `allUsers` as Cloud Run / Functions invoker is how a public service is meant to be exposed. */
 const isPublicInvoker = (line: string, ctx: LineContext) =>
@@ -224,7 +299,7 @@ export const RULES: readonly Rule[] = [
     severity: 'medium',
     title: 'Remote script piped into a shell',
     fix: 'Download to a file, verify its checksum or signature, then run it.',
-    line: line => /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b/.test(line),
+    line: line => PIPE_TO_SHELL.test(line),
   },
 
   // Terraform: GCP, AWS, Azure
@@ -334,12 +409,170 @@ export const RULES: readonly Rule[] = [
     severity: 'low',
     title: 'Image not pinned (:latest or no tag)',
     fix: 'Pin an explicit version tag or digest so rollouts are reproducible.',
+    line: line => isUnpinnedImage(/^\s*-?\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1]),
+  },
+
+  // Docker Compose
+  {
+    id: 'CMP001',
+    kind: 'compose',
+    severity: 'high',
+    title: 'Privileged container',
+    fix: 'Remove `privileged: true`; add only the capabilities the service needs with `cap_add:`.',
+    line: line => /^\s*privileged:\s*true\b/.test(line),
+  },
+  {
+    id: 'CMP002',
+    kind: 'compose',
+    severity: 'critical',
+    title: 'Docker socket mounted into a container',
+    fix: 'Do not mount `/var/run/docker.sock`: it is root on the host. Use a socket proxy with a read-only allow-list (e.g. tecnativa/docker-socket-proxy) if the service must talk to Docker.',
+    line: line => !isComment(line) && /docker\.sock/.test(line),
+  },
+  {
+    id: 'CMP003',
+    kind: 'compose',
+    severity: 'medium',
+    title: 'Host namespace shared with the container',
+    fix: 'Drop `network_mode: host`, `pid: host` and `ipc: host`; publish only the ports you need with `ports:`.',
+    line: line => /^\s*(network_mode|pid|ipc):\s*['"]?host\b/.test(line),
+  },
+  {
+    id: 'CMP004',
+    kind: 'compose',
+    severity: 'high',
+    title: 'Secret written into the compose file',
+    fix: 'Read it from the environment (`PASSWORD: ${DB_PASSWORD}` with a git-ignored `.env`) or use Compose `secrets:`.',
     line: line => {
-      const m = /^\s*-?\s*image:\s*['"]?([^'"\s]+)/.exec(line)
-      const image = m?.[1]
-      if (image === undefined || image.includes('@sha256:') || image.includes('{{')) return false
-      const tag = image.split('/').pop()!.split(':')[1]
-      return tag === undefined || tag === 'latest'
+      const m = /^\s*-?\s*['"]?(\w+)['"]?\s*[=:]\s*['"]?([^'"#\s][^'"#]*)['"]?\s*$/.exec(line)
+      const [name, value] = [m?.[1] ?? '', m?.[2]?.trim() ?? '']
+      return SECRET_NAME.test(name) && value.length >= 4 && !value.includes('${') && !isReference(name, value)
+    },
+  },
+  {
+    id: 'CMP005',
+    kind: 'compose',
+    severity: 'low',
+    title: 'Image not pinned (:latest or no tag)',
+    fix: 'Pin an explicit version tag or digest so every `docker compose up` runs the same image.',
+    line: line => isUnpinnedImage(/^\s*image:\s*['"]?([^'"\s]+)/.exec(line)?.[1]),
+  },
+
+  // package.json
+  {
+    id: 'NPM001',
+    kind: 'npm',
+    severity: 'high',
+    title: 'Install script downloads or runs remote code',
+    fix: 'Install scripts run on every `npm install` of every user. Do not fetch or eval code there; ship the code in the package or make it an explicit, documented step.',
+    line: line => {
+      const m = /"(preinstall|install|postinstall|prepare)"\s*:\s*"([^"]*)"/.exec(line)
+      return m !== null && /\b(curl|wget)\b|\|\s*(ba|z)?sh\b|\bnode\s+-e\b|base64\s+(-d|--decode)|\beval\b/.test(m[2] ?? '')
+    },
+  },
+  {
+    id: 'NPM002',
+    kind: 'npm',
+    severity: 'medium',
+    title: 'Dependency installed from a git or HTTP URL',
+    fix: 'Depend on a published version from the registry. If you must use git, pin a full commit SHA (`github:org/repo#<sha>`) and review it like vendored code.',
+    line: line => {
+      const m = /^\s*"([^"]+)"\s*:\s*"((?:git\+|git:|github:|gitlab:|bitbucket:|https?:\/\/)[^"]*)"/.exec(line)
+      if (m === null || /^(url|homepage|repository|bugs|funding|\$schema|registry)$/.test(m[1] ?? '')) return false
+      return !/#[0-9a-f]{40}$/.test(m[2] ?? '')
+    },
+  },
+  {
+    id: 'NPM003',
+    kind: 'npm',
+    severity: 'low',
+    title: 'Dependency on any version (* or latest)',
+    fix: 'Use a semver range (`^1.4.0`) and commit the lockfile, so installs are reproducible.',
+    line: line => /^\s*"[^"]+"\s*:\s*"(\*|latest|x)"\s*,?\s*$/.test(line),
+  },
+
+  // Agent configuration: Claude Code settings, MCP servers, plugin hooks
+  {
+    id: 'AGT001',
+    kind: 'agent',
+    severity: 'high',
+    title: 'Agent may run any shell command without asking',
+    fix: 'Allow narrow commands (`Bash(npm test)`, `Bash(git status:*)`) instead of `Bash`, `Bash(*)` or `*`, and do not set `defaultMode: bypassPermissions` in a shared settings file.',
+    line: (line, ctx) => {
+      if (/"defaultMode"\s*:\s*"bypassPermissions"/.test(line)) return true
+      const wildcard = /"(Bash|Bash\(\s*\*?\s*(:\s*\*)?\s*\)|\*)"/.test(line)
+      return wildcard && nearestKey(ctx.lines, ctx.index, /"(allow|deny|ask)"\s*:/) === 'allow'
+    },
+  },
+  {
+    id: 'AGT002',
+    kind: 'agent',
+    severity: 'medium',
+    title: 'Agent safeguards switched off',
+    fix: '`disableAllHooks` stops every hook and mod, guards included; `enableAllProjectMcpServers` starts any MCP server a repository brings. Leave both off in shared settings and approve servers one by one.',
+    line: line => /"(disableAllHooks|enableAllProjectMcpServers)"\s*:\s*true/.test(line),
+  },
+  {
+    id: 'AGT003',
+    kind: 'agent',
+    severity: 'medium',
+    title: 'MCP server package not pinned',
+    fix: 'Pin the version the server runs (`"args": ["-y", "@org/server@1.4.2"]`, `uvx pkg==1.4.2`). Unpinned, every start runs whatever was published last, with your credentials.',
+    file: lines => {
+      const pkgs = unpinnedServers(lines.join('\n'))
+      return pkgs.length === 0 ? -1 : lines.findIndex(l => l.includes(`"${pkgs[0]}"`))
+    },
+  },
+  {
+    id: 'AGT004',
+    kind: 'agent',
+    severity: 'high',
+    title: 'Credential written into agent configuration',
+    fix: 'Reference an environment variable (`"Authorization": "Bearer ${GITHUB_TOKEN}"`, `"env": { "API_KEY": "${API_KEY}" }`) so the secret never lands in the repository.',
+    line: line => {
+      const m = /"(\w*(?:TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_?KEY)\w*|Authorization|X-Api-Key)"\s*:\s*"([^"]{8,})"/i.exec(line)
+      const [name, value] = [m?.[1] ?? '', m?.[2] ?? '']
+      return m !== null && !value.includes('${') && !/^Bearer\s+\$/.test(value) && !isReference(name, value)
+    },
+  },
+  {
+    id: 'AGT007',
+    kind: 'agent',
+    severity: 'high',
+    title: 'Hook command runs a remote script',
+    fix: 'A hook runs on every matching event with your permissions. Keep the script in the repository and run it from there instead of piping a download into a shell.',
+    line: line => /"command"\s*:/.test(line) && PIPE_TO_SHELL.test(line),
+  },
+
+  // Instruction files the agent reads: CLAUDE.md, AGENTS.md, skills, rules
+  {
+    id: 'AGT005',
+    kind: 'instructions',
+    severity: 'high',
+    title: 'Invisible characters in an agent instruction file',
+    fix: 'Remove zero-width characters: they hide text from reviewers that the model still reads. Retype the line if you cannot see where they are.',
+    line: line => INVISIBLE.test(line),
+  },
+  {
+    id: 'AGT006',
+    kind: 'instructions',
+    severity: 'high',
+    title: 'Instruction file tells the agent to override its rules or run remote code',
+    fix: 'Instruction files are prompts every session follows. Remove text that overrides earlier instructions, hides actions from the user, switches off safeguards or pipes downloads into a shell.',
+    line: line => INJECTION.test(line) || PIPE_TO_SHELL.test(line),
+  },
+
+  // The guard's own repository config
+  {
+    id: 'AGT008',
+    kind: 'guard',
+    severity: 'high',
+    title: 'Repository config switches off guard rules',
+    fix: 'Disabling a rule turns it off for everyone in this repository. Agree on it with your team first, or silence single lines with `# guard:ignore <ID>`.',
+    line: line => /"disable"\s*:\s*\[\s*"/.test(line),
+    file: lines => {
+      const start = lines.findIndex(l => /"disable"\s*:\s*\[\s*$/.test(l))
+      return start >= 0 && /^\s*"/.test(lines[start + 1] ?? '') ? start : -1
     },
   },
 
@@ -372,16 +605,55 @@ export const RULES: readonly Rule[] = [
         line,
       ),
   },
+  {
+    id: 'SEC003',
+    kind: 'any',
+    severity: 'high',
+    title: 'Hidden bidirectional or tag characters (Trojan Source)',
+    fix: 'Remove the invisible Unicode controls: they make code or prompts read differently than they run (CVE-2021-42574). Retype the line.',
+    line: line => TROJAN.test(line),
+  },
+  {
+    id: 'SEC004',
+    kind: 'any',
+    severity: 'high',
+    title: 'Environment file not ignored by git',
+    fix: 'Add it to `.gitignore` (e.g. `.env*` with `!.env.example`) before it is committed, and keep only placeholders in a checked-in `.env.example`.',
+    // Needs git, so the mod and the CLI raise it with `envFinding`.
+  },
 ]
 
+/** `.env`, `.env.local`, `prod.env`; not the templates that are meant to be committed. */
+export const isEnvFile = (path: string) => {
+  const name = base(path)
+  return /^\.env(\..+)?$|\.env$/.test(name) && !/\.(example|sample|template|dist|defaults)$|^\.envrc$/.test(name)
+}
+
+export const envFinding = (path: string): Finding => {
+  const rule = RULES.find(r => r.id === 'SEC004')!
+  return { id: rule.id, severity: rule.severity, title: rule.title, fix: rule.fix, line: 1, snippet: base(path) }
+}
+
 const base = (path: string) => path.split(/[\\/]/).pop() ?? path
+
+const AGENT_CONFIG =
+  /(^|[\\/])(\.claude[\\/]settings(\.local)?\.json|\.mcp\.json|\.(cursor|vscode)[\\/]mcp\.json|claude_desktop_config\.json|hooks[\\/]hooks\.json)$/
+const INSTRUCTIONS =
+  /(^|[\\/])(CLAUDE(\.local)?\.md|AGENTS\.md|GEMINI\.md|SKILL\.md|\.cursorrules|\.windsurfrules|copilot-instructions\.md|\.cursor[\\/]rules[\\/].+\.mdc?|\.claude[\\/](commands|agents)[\\/].+\.md)$/
 
 export const classify = (path: string, text: string): FileKind => {
   const name = base(path)
   if (/\.github[\\/](workflows[\\/][^\\/]+|actions[\\/].+[\\/]action)\.ya?ml$/.test(path)) return 'workflow'
   if (/^(Dockerfile|Containerfile)(\..+)?$|\.(dockerfile|containerfile)$/i.test(name)) return 'dockerfile'
   if (/\.tf$/.test(name)) return 'terraform'
+  if (/^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(name)) return 'compose'
+  if (name === 'package.json') return 'npm'
+  if (name === '.guard.json') return 'guard'
+  if (AGENT_CONFIG.test(path)) return 'agent'
+  if (INSTRUCTIONS.test(path)) return 'instructions'
   if (/\.ya?ml$/.test(name) && /^apiVersion:/m.test(text) && /^kind:/m.test(text)) return 'kubernetes'
+  // Helm values carry the same securityContext and image keys the manifests do.
+  if (/(^|[\\/])values(\.[\w-]+)?\.ya?ml$/.test(path) && /(^|[\\/])(charts?|helm)[\\/]/.test(path)) return 'kubernetes'
   return 'other'
 }
 
@@ -394,11 +666,72 @@ const isIgnored = (lines: readonly string[], index: number, id: string) =>
     return m !== null && (m[1] === undefined || m[1].split(/[\s,]+/).includes(id))
   })
 
-export const scan = (path: string, text: string): Finding[] => {
+/** A repository's `.guard.json`: its own rules, and built-in rules it switches off. */
+export type GuardConfig = { rules: readonly Rule[]; disabled: ReadonlySet<string> }
+
+export const NO_CONFIG: GuardConfig = { rules: [], disabled: new Set() }
+
+export const CONFIG_FILE = '.guard.json'
+
+/**
+ * Reads `.guard.json`. A broken rule is left out and named in `errors`, so one
+ * typo never switches the whole guard off.
+ *
+ *   { "rules": [{ "id": "ACME001", "severity": "high", "title": "…", "fix": "…",
+ *                 "pattern": "regex", "files": "regex on the path" }],
+ *     "disable": ["GHA005"] }
+ */
+export const parseConfig = (text: string | undefined): { config: GuardConfig; errors: string[] } => {
+  if (text === undefined || text.trim() === '') return { config: NO_CONFIG, errors: [] }
+  let json: { rules?: unknown; disable?: unknown }
+  try {
+    json = JSON.parse(text)
+  } catch (error) {
+    return { config: NO_CONFIG, errors: [`${CONFIG_FILE} is not valid JSON: ${(error as Error).message}`] }
+  }
+  const errors: string[] = []
+  const builtIn = new Set(RULES.map(r => r.id))
+  const rules: Rule[] = []
+  for (const raw of Array.isArray(json.rules) ? json.rules : []) {
+    const r = raw as Record<string, unknown>
+    const id = typeof r.id === 'string' ? r.id : ''
+    const severity = r.severity as Severity
+    if (!/^[A-Z][A-Z0-9_-]{1,15}$/.test(id) || builtIn.has(id)) {
+      errors.push(`rule "${id}": id must be upper-case letters/digits and not a built-in id`)
+      continue
+    }
+    if (!SEVERITIES.includes(severity) || typeof r.title !== 'string' || typeof r.pattern !== 'string') {
+      errors.push(`rule ${id}: needs severity (low|medium|high|critical), title and pattern`)
+      continue
+    }
+    try {
+      if (r.pattern.length > 500 || (typeof r.files === 'string' && r.files.length > 500)) throw new Error('pattern longer than 500 characters')
+      const pattern = new RegExp(r.pattern)
+      rules.push({
+        id,
+        kind: 'any',
+        severity,
+        title: r.title,
+        fix: typeof r.fix === 'string' ? r.fix : 'See the team rule in .guard.json.',
+        paths: typeof r.files === 'string' ? new RegExp(r.files) : undefined,
+        line: line => pattern.test(line),
+      })
+    } catch (error) {
+      errors.push(`rule ${id}: ${(error as Error).message}`)
+    }
+  }
+  const disabled = new Set(Array.isArray(json.disable) ? json.disable.filter((d): d is string => typeof d === 'string') : [])
+  return { config: { rules, disabled }, errors }
+}
+
+export const scan = (path: string, text: string, config: GuardConfig = NO_CONFIG): Finding[] => {
   const kind = classify(path, text)
   const lines = text.split(/\r?\n/)
   const findings: Finding[] = []
-  const rules = RULES.filter(r => r.kind === kind || (r.kind === 'any' && !SKIP_SECRETS.test(path)))
+  const rules = [
+    ...RULES.filter(r => !config.disabled.has(r.id) && (r.kind === kind || (r.kind === 'any' && !SKIP_SECRETS.test(path)))),
+    ...config.rules.filter(r => r.paths === undefined || r.paths.test(path)),
+  ]
 
   const add = (rule: Rule, index: number, severity = rule.severity) => {
     if (isIgnored(lines, index, rule.id)) return
@@ -466,7 +799,7 @@ export const applyEdit = (text: string, oldString: string, newString: string, re
 const ICON: Record<Severity, string> = { critical: '🟥', high: '🟧', medium: '🟨', low: '⬜' }
 
 /** Rules whose line holds the secret itself: shown masked, never verbatim. */
-const SECRET_RULES = new Set(['SEC001', 'SEC002', 'DKR003', 'TF005'])
+const SECRET_RULES = new Set(['SEC001', 'SEC002', 'DKR003', 'TF005', 'CMP004', 'AGT004'])
 
 /** Keeps the first 3 characters of each value and masks the rest. */
 export const mask = (line: string) =>

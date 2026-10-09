@@ -6,7 +6,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-**DevSecOps guardrails for Claude Code.** Every GitHub Actions workflow, Dockerfile, Terraform file, Kubernetes manifest and secret that Claude writes is checked *before* it hits your disk. When something is wrong, Claude gets the findings and fixes them itself. Destructive cloud commands come to you before they run.
+**DevSecOps guardrails for Claude Code.** Every GitHub Actions workflow, Dockerfile, Terraform file, Kubernetes manifest, Compose file, `package.json`, agent config (`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`) and secret that Claude writes is checked *before* it hits your disk. When something is wrong, Claude gets the findings and fixes them itself. Destructive cloud commands come to you before they run.
 
 ![Shift-Left Guard blocking a script injection and Claude fixing it](docs/demo.gif)
 
@@ -127,7 +127,19 @@ No secret leaves your machine because of this mod.
 | You | your editor | ✅ at `git commit`, with `/guard install-hook` |
 | Anyone | CI | ✅ with `guard-scan.mjs --all` ([see below](#ci)) |
 
-Only the changed file is scanned, and only what the change introduces is reported. A file such as `abc.yml` gets the full rule set when it is a workflow (`.github/workflows/`) or a Kubernetes manifest (`apiVersion:` + `kind:`). Any other file is checked for secrets only.
+Only the changed file is scanned, and only what the change introduces is reported. A file such as `abc.yml` gets the full rule set when it is a workflow (`.github/workflows/`) or a Kubernetes manifest (`apiVersion:` + `kind:`). Any other file is checked for secrets and hidden Unicode only.
+
+| File | Rule set |
+|---|---|
+| `.github/workflows/*.yml`, `action.yml` | GHA |
+| `Dockerfile*`, `*.dockerfile`, `Containerfile` | DKR |
+| `*.tf` | TF |
+| Kubernetes manifests, Helm `charts/**/values*.yaml` | K8S |
+| `compose.yml`, `docker-compose*.yml` | CMP |
+| `package.json` | NPM |
+| `.claude/settings*.json`, `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `hooks/hooks.json` | AGT001–004, AGT007 |
+| `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `SKILL.md`, `.claude/commands/*.md`, `.claude/agents/*.md`, `.cursorrules`, `copilot-instructions.md` | AGT005–006 |
+| every file | SEC |
 
 ## Rules
 
@@ -154,9 +166,27 @@ Only the changed file is scanned, and only what the change introduces is reporte
 | K8S001 | high | `privileged: true` |
 | K8S002 | medium | `hostNetwork`/`hostPID`/`hostIPC`/`hostPath` |
 | K8S003 | medium | `allowPrivilegeEscalation: true`, `runAsUser: 0` |
-| K8S004 | low | Image `:latest` or untagged |
+| K8S004 | low | Image `:latest` or untagged (also in Helm `charts/**/values*.yaml`) |
+| CMP001 | high | Compose: `privileged: true` |
+| CMP002 | critical | Compose: Docker socket mounted into a container |
+| CMP003 | medium | Compose: `network_mode`/`pid`/`ipc: host` |
+| CMP004 | high | Compose: literal secret in `environment:` (skips `${VAR}`, `*_FILE`) |
+| CMP005 | low | Compose: image `:latest` or untagged |
+| NPM001 | high | `package.json` install script fetches or evals code (`curl`, `\| sh`, `node -e`, `base64 -d`) |
+| NPM002 | medium | Dependency from a git/HTTP URL not pinned to a commit SHA |
+| NPM003 | low | Dependency on `*` or `latest` |
+| AGT001 | high | Agent may run any shell command: `Bash`, `Bash(*)`, `*` in `allow`, or `defaultMode: bypassPermissions` |
+| AGT002 | medium | `disableAllHooks` or `enableAllProjectMcpServers` switched on |
+| AGT003 | medium | MCP server started with an unpinned `npx`/`bunx`/`pnpm dlx`/`uvx`/`pipx run` package |
+| AGT004 | high | Credential literal in agent config (`env`, `headers`) instead of `${VAR}` |
+| AGT005 | high | Invisible zero-width characters in `CLAUDE.md`, `AGENTS.md`, skills, commands, rules |
+| AGT006 | high | Instruction file overrides earlier instructions, hides actions from the user, switches off safeguards or pipes downloads into a shell |
+| AGT007 | high | Hook command pipes a download into a shell |
+| AGT008 | high | `.guard.json` switches built-in rules off |
 | SEC001 | critical | Private keys with key material (any file; a bare header in docs is ignored) |
 | SEC002 | critical | AWS, GCP API, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI keys (any file) |
+| SEC003 | high | Hidden bidi or Unicode tag characters, "Trojan Source" (any file) |
+| SEC004 | high | New `.env` file that git does not ignore (templates like `.env.example` are fine) |
 
 `allUsers` on `roles/run.invoker` / `roles/cloudfunctions.invoker` is allowed, because that is how a public Cloud Run service is exposed.
 
@@ -166,6 +196,32 @@ Add `# guard:ignore` (all rules) or `# guard:ignore GHA001` (one rule) on the li
 
 > [!WARNING]
 > Claude is told to add `guard:ignore` only with your agreement. Review these comments in PRs like any other security exception.
+
+In Markdown use an HTML comment: `<!-- guard:ignore AGT006 -->`.
+
+### Team rules: `.guard.json`
+
+Put a `.guard.json` in the repository root to add your own rules or switch built-in ones off. The mod, the pre-commit hook and CI all read it.
+
+```json
+{
+  "rules": [
+    {
+      "id": "ACME001",
+      "severity": "high",
+      "title": "Base images must come from the internal registry",
+      "fix": "Use FROM registry.acme.io/<image>:<tag>.",
+      "pattern": "^FROM (?!registry\\.acme\\.io)",
+      "files": "Dockerfile"
+    }
+  ],
+  "disable": ["GHA005"]
+}
+```
+
+- `pattern` is a JavaScript regular expression matched against each line; `files` (optional) is matched against the path.
+- IDs are upper-case and must not reuse a built-in ID. A broken rule is skipped and reported, the rest keep working.
+- `disable` is itself a finding (AGT008), so Claude cannot quietly switch a rule off: you see it and decide.
 
 ## Settings
 
@@ -191,6 +247,22 @@ The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](b
 Pin the tag (or a commit SHA) rather than `main`, so a new release never changes your pipeline unreviewed.
 
 `--all` audits every tracked file. Without it, the script scans staged changes only (pre-commit mode).
+
+**GitHub code scanning:** `--format=sarif` prints [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), so findings show up in the Security tab and as PR annotations:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@<sha> # v4
+  - run: curl -fsSLO https://raw.githubusercontent.com/PascalNehlsen/shift-left-guard/<tag>/bin/guard-scan.mjs
+  - run: node guard-scan.mjs --all --format=sarif > guard.sarif
+    continue-on-error: true
+  - uses: github/codeql-action/upload-sarif@<sha> # v3
+    with:
+      sarif_file: guard.sarif
+```
 
 ## What it is not
 
