@@ -151,7 +151,7 @@ const fakeRepo = (on: On, files: Record<string, string>, head: Record<string, st
     if (cmd !== 'git') return ok('')
     if (a === 'rev-parse' && b === '--show-toplevel') return ok('/repo\n')
     if (a === 'rev-parse' && b === '--absolute-git-dir') return ok('/repo/.git\n')
-    if (a === 'config') return hooksPath ? ok(`${hooksPath}\n`) : fail
+    if (a === 'config') return ok(`command\t/dev/null\n${hooksPath ? `local\t${hooksPath}\n` : ''}`)
     if (a === 'ls-files') {
       const rels = Object.keys(files).filter(f => f.startsWith('/repo/') && !f.startsWith('/repo/.git/')).map(f => f.slice(6))
       return ok(rels.join('\0'))

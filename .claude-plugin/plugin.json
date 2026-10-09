@@ -1,6 +1,6 @@
 {
   "name": "shift-left-guard",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DevSecOps guardrails for Claude: scans every workflow, Dockerfile, Terraform, Kubernetes manifest and secret Claude writes, makes it fix the issues itself, and asks before destructive cloud commands.",
   "author": { "name": "Pascal Nehlsen" },
   "license": "MIT",

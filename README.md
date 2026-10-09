@@ -80,7 +80,7 @@ claude plugin marketplace update shift-left-guard
 claude plugin update shift-left-guard@shift-left-guard
 ```
 
-Then run `/reload-plugins` in an open session, or start a new one. To stay on a fixed release, add the marketplace pinned to a tag instead: `PascalNehlsen/shift-left-guard#v0.2.0`.
+Then run `/reload-plugins` in an open session, or start a new one. To stay on a fixed release, add the marketplace pinned to a tag instead: `PascalNehlsen/shift-left-guard#v0.2.1`.
 
 ## What it does
 
