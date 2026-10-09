@@ -7,11 +7,11 @@ Thanks for helping make Claude's output safer! New rules, fewer false positives 
 You need Node 24 and [Bun](https://bun.sh) 1.3.14 (the version CI uses, so the bundle stays byte-identical).
 
 ```bash
-npm ci                     # installs the pinned Claude Code CLI used for validate/test
-npm run validate           # manifest, marketplace and hooks module
-npm test                   # plugin tests (no login or API key needed)
-bun run build              # bundles cli/guard-scan.ts → bin/guard-scan.mjs
-npm run self-scan          # this repo, checked with its own rules
+npm ci --prefix dev             # installs the pinned Claude Code CLI used for validate/test
+npm --prefix dev run validate   # manifest, marketplace and hooks module (--strict)
+npm --prefix dev test           # plugin tests (no login or API key needed)
+bun run --cwd dev build         # bundles cli/guard-scan.ts → bin/guard-scan.mjs
+npm --prefix dev run self-scan  # this repo, checked with its own rules
 ```
 
 Try your local copy in a real session with `claude --plugin-dir .`.
@@ -27,7 +27,7 @@ Try your local copy in a real session with `claude --plugin-dir .`.
    - **Severity:** `high` and `critical` block the write by default, so reserve them for issues that are exploitable as written.
 2. Add a test to [`tests/rules.test.ts`](tests/rules.test.ts) with at least **one positive and one negative example**. The negative example is the safe code that must *not* be flagged.
 3. If the rule matches values that are secrets, add its ID to `SECRET_RULES` so findings are masked.
-4. Run `bun run build` and commit `bin/guard-scan.mjs` together with your rule. CI fails if the bundle is out of date.
+4. Run `bun run --cwd dev build` and commit `bin/guard-scan.mjs` together with your rule. CI fails if the bundle is out of date.
 5. Add the rule to the table in [`docs/rules.md`](docs/rules.md) (and the "why" with its CWE to `EXPLAIN` in `hooks/rules.ts`).
 
 > [!TIP]

@@ -1,0 +1,18 @@
+{
+  "name": "shift-left-guard-dev",
+  "private": true,
+  "description": "Development tools only. Kept out of the plugin root so Claude Code installs nothing when someone installs the plugin.",
+  "type": "module",
+  "scripts": {
+    "build": "cd .. && bun build cli/guard-scan.ts --target=node --format=esm --outfile=bin/guard-scan.mjs",
+    "test": "cd .. && claude plugin test .",
+    "validate": "cd .. && claude plugin validate --strict .",
+    "self-scan": "cd .. && node bin/guard-scan.mjs --all --block-at=high"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.295"
+  },
+  "allowScripts": {
+    "@anthropic-ai/claude-code": true
+  }
+}

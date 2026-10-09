@@ -30,16 +30,16 @@ jobs:
         with:
           node-version: 24
 
-      # The Claude Code CLI is pinned in package-lock.json (the plugin API is
+      # The Claude Code CLI is pinned in dev/package-lock.json (the plugin API is
       # early access); Dependabot proposes bumps as PRs this job then tests.
       - name: Install the pinned Claude Code CLI
-        run: npm ci
+        run: npm ci --prefix dev
 
       - name: Validate manifest, marketplace and hooks module
-        run: npm run validate
+        run: npm --prefix dev run validate
 
       - name: Run plugin tests
-        run: npm test
+        run: npm --prefix dev test
 
   scanner:
     name: Scanner bundle & self-scan
@@ -59,14 +59,14 @@ jobs:
           node-version: 24
 
       - name: Rebuild the pre-commit scanner
-        run: bun run build
+        run: bun run --cwd dev build
 
       - name: Check the committed bundle is up to date
         run: |
           if ! git diff --exit-code -- bin/guard-scan.mjs; then
-            echo "::error file=bin/guard-scan.mjs::Out of date with hooks/rules.ts. Run 'bun run build' and commit the result."
+            echo "::error file=bin/guard-scan.mjs::Out of date with hooks/rules.ts. Run 'bun run --cwd dev build' and commit the result."
             exit 1
           fi
 
       - name: Scan this repository with its own rules
-        run: npm run self-scan
+        run: npm --prefix dev run self-scan
