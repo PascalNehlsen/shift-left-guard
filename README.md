@@ -66,6 +66,22 @@ There is nothing to switch on. The guard runs in every new session, in every pro
 > [!NOTE]
 > The pre-commit hook is not installed automatically. The mod only guards what Claude writes, until you run `/guard install-hook` in a repo.
 
+### Updates
+
+> [!IMPORTANT]
+> Claude Code does **not** auto-update plugins from community marketplaces by default, so new rules and fixes will not reach you on their own.
+
+**Turn on auto-update (recommended):** `/plugin` → **Marketplaces** → shift-left-guard → **Enable auto-update**. Claude Code then checks in the background during a session, within about ten minutes of your first message. A new version is downloaded but takes effect only after `/reload-plugins` or in your next session.
+
+**Or update by hand:**
+
+```bash
+claude plugin marketplace update shift-left-guard
+claude plugin update shift-left-guard@shift-left-guard
+```
+
+Then run `/reload-plugins` in an open session, or start a new one. To stay on a fixed release, add the marketplace pinned to a tag instead: `PascalNehlsen/shift-left-guard#v0.2.0`.
+
 ## What it does
 
 | | |

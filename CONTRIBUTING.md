@@ -44,3 +44,6 @@ Try your local copy in a real session with `claude --plugin-dir .`.
 1. Bump `version` in `.claude-plugin/plugin.json`.
 2. Merge to `main`, then tag: `git tag v0.2.0 && git push origin v0.2.0`.
 3. The release workflow runs CI, checks the tag matches `plugin.json`, and creates the GitHub release with generated notes.
+
+> [!IMPORTANT]
+> What ships to users is the `version` in `plugin.json` on `main`, not the tag. Claude Code detects updates by that string, so a change merged without a version bump never reaches installed copies. The tag only produces the GitHub release and lets users pin `#vX.Y.Z`.
