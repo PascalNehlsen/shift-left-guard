@@ -3,7 +3,29 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 // hooks/rules.ts
-var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => severity === "never" ? 1 / 0 : SEVERITIES.indexOf(severity), FULL_SHA = /^[0-9a-f]{40}$/, INJECTABLE = /\$\{\{\s*(github\.head_ref|github\.event\.(issue|pull_request|comment|review|review_comment|discussion|discussion_comment|head_commit|commits|pages)\b[^}]*\.(title|body|head_ref|ref|label|name|email|message|page_name|default_branch))\s*\}\}/, SECRET_NAME = /(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)/i, isComment = (line) => /^\s*#/.test(line), isPublicInvoker = (line, ctx) => /"allUsers"/.test(line) && ctx.lines.slice(Math.max(0, ctx.index - 4), ctx.index + 5).some((l) => /roles\/(run|cloudfunctions)\.invoker/.test(l)), RULES = [
+var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => severity === "never" ? 1 / 0 : SEVERITIES.indexOf(severity), enclosingBlock = (lines, index) => {
+  let braces = (l) => (l.match(/\{/g)?.length ?? 0) - (l.match(/\}/g)?.length ?? 0), depth = 0, start = 0;
+  for (let i = index - 1;i >= 0; i--)
+    if (depth += braces(lines[i] ?? ""), depth > 0) {
+      start = i;
+      break;
+    }
+  let end = lines.length - 1;
+  depth = 0;
+  for (let i = start;i < lines.length; i++)
+    if (depth += braces(lines[i] ?? ""), depth <= 0 && i > start) {
+      end = i;
+      break;
+    }
+  return { header: lines[start] ?? "", body: lines.slice(start, end + 1).join(`
+`) };
+}, WEB_PORTS = /* @__PURE__ */ new Set([80, 443]), portsOf = (body) => {
+  let ports = [
+    ...[...body.matchAll(/\b(from_port|to_port|port|destination_port_range)\s*=\s*"?(\d+)"?/g)].map((m) => Number(m[2])),
+    ...[...body.matchAll(/\bports\s*=\s*\[([^\]]*)\]/g)].flatMap((m) => [...(m[1] ?? "").matchAll(/\d+/g)].map((n) => Number(n[0])))
+  ];
+  return ports.length === 0 ? void 0 : ports;
+}, isReference = (name, value) => /_(FILE|PATH|DIR|URL|URI|ENDPOINT|NAME|ID|ARN|REF|VERSION|LENGTH|POLICY|TYPE|ROTATION|TTL|MODE|ALGORITHM|COUNT|HEADER)$/i.test(name) || /^["']?(\$\{?[\w.]+\}?|[a-z][\w+.-]*:\/\/\S*|\.{0,2}\/\S*|\d+|true|false|yes|no|on|off)["']?$/i.test(value.trim()), FULL_SHA = /^[0-9a-f]{40}$/, INJECTABLE = /\$\{\{\s*(github\.head_ref|github\.event\.(issue|pull_request|comment|review|review_comment|discussion|discussion_comment|head_commit|commits|pages)\b[^}]*\.(title|body|head_ref|ref|label|name|email|message|page_name|default_branch))\s*\}\}/, SECRET_NAME = /(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)/i, isComment = (line) => /^\s*#/.test(line), isPublicInvoker = (line, ctx) => /"allUsers"/.test(line) && ctx.lines.slice(Math.max(0, ctx.index - 4), ctx.index + 5).some((l) => /roles\/(run|cloudfunctions)\.invoker/.test(l)), RULES = [
   {
     id: "GHA001",
     kind: "workflow",
@@ -37,8 +59,8 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     id: "GHA003",
     kind: "workflow",
     severity: "high",
-    title: "Script injection: untrusted event data in run:",
-    fix: 'Move the expression into `env:` (e.g. `env: TITLE: ${{ github.event.issue.title }}`) and use `"$TITLE"` in the script.',
+    title: "Script injection: untrusted event data in run:/script:",
+    fix: 'Move the expression into `env:` (e.g. `env: TITLE: ${{ github.event.issue.title }}`) and use `"$TITLE"` in the script; in actions/github-script read `process.env.TITLE` or `context.payload`.',
     line: (line, ctx) => ctx.inRunBlock && INJECTABLE.test(line)
   },
   {
@@ -61,7 +83,7 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     id: "GHA006",
     kind: "workflow",
     severity: "medium",
-    title: "Secret interpolated directly into run:",
+    title: "Secret interpolated directly into run:/script:",
     fix: 'Pass secrets through `env:` and reference `"$MY_SECRET"`; inline `${{ secrets.X }}` ends up in the generated script and process list.',
     line: (line, ctx) => ctx.inRunBlock && /\$\{\{\s*secrets\.(?!GITHUB_TOKEN\b)/.test(line)
   },
@@ -91,10 +113,30 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     title: "Container runs as root",
     fix: "Create an unprivileged user and switch to it before CMD: `RUN useradd -r -u 10001 app` + `USER app`.",
     file: (lines) => {
-      let last = lines.map((l, i) => [i, /^\s*USER\s+(\S+)/i.exec(l)?.[1]]).filter(([, u]) => u).at(-1);
-      if (last === void 0)
-        return lines.findLastIndex((l) => /^\s*FROM\s/i.test(l));
-      return last[1] === "root" || last[1] === "0" || last[1]?.startsWith("0:") ? last[0] : -1;
+      let stages = lines.flatMap((l, i) => {
+        let m = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?/i.exec(l);
+        return m ? [{ start: i, image: (m[1] ?? "").toLowerCase(), alias: m[2]?.toLowerCase() }] : [];
+      }), userIn = (stage, seen) => {
+        let s = stages[stage];
+        if (s === void 0 || seen > stages.length)
+          return;
+        let end = stages[stage + 1]?.start ?? lines.length;
+        for (let i = end - 1;i > s.start; i--) {
+          let user = /^\s*USER\s+(\S+)/i.exec(lines[i] ?? "")?.[1];
+          if (user !== void 0)
+            return { user, at: i };
+        }
+        if (/nonroot|rootless/.test(s.image))
+          return { user: "nonroot", at: s.start };
+        let parent = stages.findIndex((p) => p.alias === s.image);
+        return parent >= 0 && parent < stage ? userIn(parent, seen + 1) : void 0;
+      }, last = stages.length - 1;
+      if (last < 0)
+        return -1;
+      let found = userIn(last, 0);
+      if (found === void 0)
+        return stages[last]?.start ?? -1;
+      return /^(root|0)(:|$)/.test(found.user) ? found.at : -1;
     }
   },
   {
@@ -104,8 +146,8 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     title: "Secret baked into the image via ENV/ARG",
     fix: "Never put secrets in ENV/ARG (they stay in the image history). Use `RUN --mount=type=secret,id=...` at build time and inject at runtime from a secret manager.",
     line: (line) => {
-      let m = /^\s*(ENV|ARG)\s+(\S+?)(?:[=\s]+(.*))?$/i.exec(line);
-      return m !== null && SECRET_NAME.test(m[2] ?? "") && m[3] !== void 0 && m[3].trim() !== "";
+      let m = /^\s*(ENV|ARG)\s+(\S+?)(?:[=\s]+(.*))?$/i.exec(line), [name, value] = [m?.[2] ?? "", m?.[3]?.trim() ?? ""];
+      return SECRET_NAME.test(name) && value !== "" && !isReference(name, value);
     }
   },
   {
@@ -129,8 +171,16 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     kind: "terraform",
     severity: "high",
     title: "Open to the whole internet (0.0.0.0/0)",
-    fix: "Restrict source ranges to known CIDRs, a load balancer or IAP (GCP: 35.235.240.0/20), or use private networking.",
-    line: (line) => /(0\.0\.0\.0\/0|::\/0)/.test(line) && !/egress|destination/i.test(line) && !isComment(line)
+    fix: "Restrict source ranges to known CIDRs, a load balancer or IAP (GCP: 35.235.240.0/20), or use private networking. Ports 80/443 on a public load balancer are expected: confirm it is one.",
+    line: (line, ctx) => {
+      if (isComment(line) || !/(0\.0\.0\.0\/0|::\/0)/.test(line) || /egress|destination/i.test(line))
+        return !1;
+      let { header, body } = enclosingBlock(ctx.lines, ctx.index);
+      if (/\b(egress|route)\b|aws_route/.test(header) || /\btype\s*=\s*"egress"|\bdirection\s*=\s*"(EGRESS|Outbound)"/i.test(body))
+        return !1;
+      let ports = portsOf(body);
+      return ports !== void 0 && ports.every((p) => WEB_PORTS.has(p)) ? "medium" : !0;
+    }
   },
   {
     id: "TF002",
@@ -151,9 +201,9 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
   {
     id: "TF004",
     kind: "terraform",
-    severity: "high",
+    severity: "medium",
     title: "Database reachable from a public IP",
-    fix: "Use private IP / private endpoints. GCP Cloud SQL: `ipv4_enabled = false` + `private_network`; AWS RDS: `publicly_accessible = false`.",
+    fix: "Use private IP / private endpoints. GCP Cloud SQL: `ipv4_enabled = false` + `private_network`, or keep public IP only with the Cloud SQL connector, IAM auth and no `authorized_networks`; AWS RDS: `publicly_accessible = false`.",
     line: (line) => !isComment(line) && /(publicly_accessible|ipv4_enabled)\s*=\s*true/.test(line)
   },
   {
@@ -162,7 +212,10 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     severity: "critical",
     title: "Hard-coded secret in Terraform",
     fix: "Reference a secret manager (`google_secret_manager_secret_version`, `aws_secretsmanager_secret_version`, `azurerm_key_vault_secret`) or a `sensitive = true` variable; generate passwords with `random_password`.",
-    line: (line) => !isComment(line) && /^\s*\w*(password|secret|token|api_key|private_key|access_key)\w*\s*=\s*"(?!\$\{)[^"]{4,}"/i.test(line) && !/(_name|_id|_arn|_version|_ref)\s*=/.test(line)
+    line: (line) => {
+      let m = /^\s*(\w*(password|secret|token|api_key|private_key|access_key)\w*)\s*=\s*"([^"]{4,})"/i.exec(line);
+      return !isComment(line) && m !== null && !(m[3] ?? "").startsWith("${") && !isReference(m[1] ?? "", m[3] ?? "");
+    }
   },
   {
     id: "TF006",
@@ -224,7 +277,13 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     severity: "critical",
     title: "Private key",
     fix: "Remove the key from the file, rotate it, and load it from a secret manager or a mounted secret at runtime.",
-    line: (line) => /-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY( BLOCK)?-----/.test(line)
+    line: (line, ctx) => {
+      let header = /-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY( BLOCK)?-----/.exec(line);
+      if (header === null)
+        return !1;
+      let rest = line.slice(header.index + header[0].length).replace(/\\n/g, ""), next = (ctx.lines[ctx.index + 1] ?? "").replace(/^[\s#/*'"|-]+/, "");
+      return /[A-Za-z0-9+/]{40,}/.test(rest) || /^[A-Za-z0-9+/=]{40,}/.test(next);
+    }
   },
   {
     id: "SEC002",
@@ -249,12 +308,12 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
   let m = /guard:ignore(?:\s+([A-Z0-9, ]+))?/.exec(l ?? "");
   return m !== null && (m[1] === void 0 || m[1].split(/[\s,]+/).includes(id));
 }), scan = (path, text) => {
-  let kind = classify(path, text), lines = text.split(/\r?\n/), findings = [], rules = RULES.filter((r) => r.kind === kind || r.kind === "any" && !SKIP_SECRETS.test(path)), add = (rule, index) => {
+  let kind = classify(path, text), lines = text.split(/\r?\n/), findings = [], rules = RULES.filter((r) => r.kind === kind || r.kind === "any" && !SKIP_SECRETS.test(path)), add = (rule, index, severity = rule.severity) => {
     if (isIgnored(lines, index, rule.id))
       return;
     findings.push({
       id: rule.id,
-      severity: rule.severity,
+      severity,
       title: rule.title,
       fix: rule.fix,
       line: index + 1,
@@ -262,17 +321,19 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     });
   }, runIndent = -1;
   lines.forEach((line, index) => {
-    let indent = line.length - line.trimStart().length, run = /^(\s*)(-\s*)?run:\s*(.*)$/.exec(line), inRunBlock = !1;
+    let indent = line.length - line.trimStart().length, run = /^(\s*)(-\s*)?(run|script):\s*(.*)$/.exec(line), inRunBlock = !1;
     if (run)
-      inRunBlock = !0, runIndent = /^[|>]/.test(run[3] ?? "") ? indent : -1;
+      inRunBlock = !0, runIndent = /^[|>]/.test(run[4] ?? "") ? indent : -1;
     else if (runIndent >= 0)
       if (line.trim() === "" || indent > runIndent)
         inRunBlock = !0;
       else
         runIndent = -1;
-    for (let rule of rules)
-      if (rule.line?.(line, { inRunBlock, text, lines, index }))
-        add(rule, index);
+    for (let rule of rules) {
+      let hit = rule.line?.(line, { inRunBlock, text, lines, index });
+      if (hit)
+        add(rule, index, hit === !0 ? rule.severity : hit);
+    }
   });
   for (let rule of rules) {
     let index = rule.file?.(lines) ?? -1;
@@ -291,7 +352,7 @@ var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => sev
     return !0;
   });
 };
-var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDFE8", low: "⬜" }, SECRET_RULES = /* @__PURE__ */ new Set(["SEC001", "SEC002", "DKR003", "TF005"]), mask = (line) => line.replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead, value) => `${lead}${value.slice(0, 3)}****`).replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}/g, "$1****"), formatFindings = (path, findings) => findings.map((f) => {
+var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDFE8", low: "⬜" }, SECRET_RULES = /* @__PURE__ */ new Set(["SEC001", "SEC002", "DKR003", "TF005"]), mask = (line) => line.replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead, value) => `${lead}${value.slice(0, 3)}****`).replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, "$1****"), formatFindings = (path, findings) => findings.map((f) => {
   let shown = SECRET_RULES.has(f.id) ? mask(f.snippet) : f.snippet;
   return `${ICON[f.severity]} ${f.id} [${f.severity}] ${base(path)}:${f.line}: ${f.title}
    ${shown}
