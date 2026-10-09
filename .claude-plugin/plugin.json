@@ -1,10 +1,10 @@
 {
   "name": "shift-left-guard",
-  "version": "0.2.1",
-  "description": "DevSecOps guardrails for Claude: scans every workflow, Dockerfile, Terraform, Kubernetes manifest and secret Claude writes, makes it fix the issues itself, and asks before destructive cloud commands.",
+  "version": "0.3.0",
+  "description": "DevSecOps guardrails for Claude: scans every workflow, Dockerfile, Terraform, Kubernetes, Compose, package.json, agent config and secret Claude writes, makes it fix the issues itself, scores your repo, and asks before destructive cloud commands.",
   "author": { "name": "Pascal Nehlsen" },
   "license": "MIT",
-  "keywords": ["security", "devsecops", "github-actions", "docker", "terraform", "kubernetes", "secrets", "gcp", "aws", "azure"],
+  "keywords": ["security", "mcp", "prompt-injection", "sarif", "devsecops", "github-actions", "docker", "terraform", "kubernetes", "secrets", "gcp", "aws", "azure"],
   "types": "./types/index.d.ts",
   "userConfig": {
     "blockAt": {

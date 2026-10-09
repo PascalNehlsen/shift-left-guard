@@ -193,7 +193,7 @@ describe('band', () => {
 })
 
 /** A repo at /repo whose git answers from the in-memory disk. */
-const fakeRepo = (on: On, files: Record<string, string>, head: Record<string, string> = {}, hooksPath = '') => {
+const fakeRepo = (on: On, files: Record<string, string>, head: Record<string, string> = {}, hooksPath = '', remote = '') => {
   const disk = fakeDisk(on, files)
   const runs: string[][] = []
   on('fs.stat', ($, e) =>
@@ -214,6 +214,7 @@ const fakeRepo = (on: On, files: Record<string, string>, head: Record<string, st
     if (cmd !== 'git') return ok('')
     if (a === 'rev-parse' && b === '--show-toplevel') return ok('/repo\n')
     if (a === 'rev-parse' && b === '--absolute-git-dir') return ok('/repo/.git\n')
+    if (a === 'remote') return remote ? ok(`${remote}\n`) : fail
     if (a === 'config') return ok(`command\t/dev/null\n${hooksPath ? `local\t${hooksPath}\n` : ''}`)
     if (a === 'ls-files') {
       const rels = Object.keys(files).filter(f => f.startsWith('/repo/') && !f.startsWith('/repo/.git/')).map(f => f.slice(6))
@@ -296,6 +297,62 @@ describe('repository config', () => {
     const r = await $.tool.call({ tool: 'Write', file_path: '/repo/.env', content: 'DEBUG=1\n' })
     expect(r.deny ?? '').toContain('SEC004')
     expect(disk.writes).toEqual([])
+  })
+})
+
+describe('audit', () => {
+  test('scores the repository and hands the fix to the prompt and the pane', async ($, on) => {
+    const files: Record<string, string> = {
+      '/repo/.github/workflows/ci.yml': UNSAFE,
+      '/repo/Dockerfile': 'FROM node:latest\nUSER app\n',
+      '/repo/README.md': '# hi\n',
+    }
+    fakeRepo(on, files)
+    on('ui.open', () => ({ value: { isPlaced: true } as never }))
+    const filled: string[] = []
+    on('prompt.fill', ($, e) => {
+      filled.push(e.text)
+      return { isFilled: true } as never
+    })
+    const r = await $.command.run({ command: 'guard', args: 'audit' } as never)
+    expect(r.text).toContain('Security score: 87/100 · grade B')
+    expect(r.text).toContain('GHA003')
+    const fix = await $.command.run({ command: 'guard', args: 'fix' } as never)
+    expect(fix.text).toContain('Press Enter')
+    expect(filled[0]).toContain('.github/workflows/ci.yml:5 GHA003 (high)')
+    const badge = await $.command.run({ command: 'guard', args: 'badge' } as never)
+    expect(badge.text).toContain('shift--left--guard-B-green')
+    expect(files['/repo/.github/shift-left-guard.json']).toBeUndefined()
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const pane = await $.ui.mount({
+        plugin: 'shift-left-guard',
+        surface,
+        component: 'Pane',
+        requestId: 'shift-left-guard-report',
+        props: {} as never,
+      } as never)
+      expect(await pane.find({ type: 'Text', text: /Grade B · 87\/100/ })).toBeDefined()
+      await pane.press({ key: 'fix' })
+      await pane.unmount()
+    }
+    expect(filled.length).toBe(3)
+  })
+})
+
+describe('live badge', () => {
+  test('/guard badge writes the badge file, and the next audit keeps it current', async ($, on) => {
+    const files: Record<string, string> = { '/repo/Dockerfile': 'FROM node:latest\nUSER app\n' }
+    fakeRepo(on, files, {}, '', 'git@github.com:acme/api.git')
+    on('ui.open', () => ({ value: { isPlaced: true } as never }))
+    const badge = await $.command.run({ command: 'guard', args: 'badge' } as never)
+    expect(badge.text).toContain('img.shields.io/endpoint?url=')
+    expect(badge.text).toContain(encodeURIComponent('acme/api/main/.github/shift-left-guard.json'))
+    expect(JSON.parse(files['/repo/.github/shift-left-guard.json']!).message).toBe('A · 97/100')
+    files['/repo/Dockerfile'] = 'FROM node:latest\nENV API_KEY=abc123\n'
+    const audit = await $.command.run({ command: 'guard', args: 'audit' } as never)
+    expect(audit.text).toContain('Badge updated')
+    expect(JSON.parse(files['/repo/.github/shift-left-guard.json']!).message).toBe('B · 84/100')
   })
 })
 

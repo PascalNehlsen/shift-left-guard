@@ -1,22 +1,29 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
-import type { Finding, GuardEvent, Severity, Totals } from '../types'
+import type { Audit, Finding, GuardEvent, Severity, Totals } from '../types'
 import {
   CONFIG_FILE,
   EXPLAIN,
   RULES,
   applyEdit,
+  BADGE_FILE,
+  badgeFileUrl,
+  badgeJson,
+  badgeMarkdown,
   blastRadius,
   destructive,
   envFinding,
+  envHasSecrets,
   formatFindings,
   introduced,
   isEnvFile,
   parseConfig,
   rank,
   scan,
+  scoreOf,
   shown,
+  weekOf,
 } from './rules'
 import type { GuardConfig } from './rules'
 
@@ -26,14 +33,20 @@ const pending = atom({ plugin: 'shift-left-guard', key: 'pending' } as const, {}
 const isPaused = atom({ plugin: 'shift-left-guard', key: 'isPaused' } as const, false)
 const isBandHidden = atom({ plugin: 'shift-left-guard', key: 'isBandHidden' } as const, false)
 const verdicts = atom({ plugin: 'shift-left-guard', key: 'verdicts' } as const, {})
+const audit = atom({ plugin: 'shift-left-guard', key: 'audit' } as const, null)
 
 const LIFETIME = 'lifetime'
+const WEEKS = 'weeks'
+const RECAP_SHOWN = 'recapShown'
+const MAX_AUDIT_FILES = 3000
+const MAX_AUDIT_LISTED = 50
 const MAX_ATTEMPTS = 2
 const PANE = 'shift-left-guard-report'
 const MAX_SHELL_FILES = 40
 const MAX_FILE_BYTES = 1_000_000
 
 type $ = EngineInterface
+type AuditFinding = Audit['findings'][number]
 type Opts = { blockAt: Severity | 'never'; explain: boolean }
 type Verdict = GuardEvent['action'] | 'clean'
 
@@ -55,11 +68,20 @@ const windowAt = (text: string, line: number) => text.split(/\r?\n/).slice(Math.
  */
 const diffOf = (id: string, blocked: readonly string[] | undefined, line: number | undefined, fixed: string) => {
   if (blocked === undefined || line === undefined) return undefined
-  const now = fixed.split(/\r?\n/).slice(Math.max(0, line - 1 - DIFF_CONTEXT - 2), line + DIFF_CONTEXT + 2)
-  const show = (l: string) => shown({ id, snippet: l.trim() }).slice(0, 120)
-  const minus = blocked.filter(l => l.trim() !== '' && !now.includes(l)).slice(0, 3).map(show)
-  const plus = now.filter(l => l.trim() !== '' && !blocked.includes(l)).slice(0, 3).map(show)
-  return minus.length + plus.length === 0 ? undefined : { minus, plus }
+  // The fix may add or remove lines above the finding, so compare against a wider
+  // stretch of the fixed file than the stretch that was blocked.
+  const all = fixed.split(/\r?\n/)
+  const near = (l: string, lines: readonly string[]) => lines.some(n => n.trimEnd() === l.trimEnd())
+  const wide = all.slice(Math.max(0, line - 1 - 3 * DIFF_CONTEXT), line + 3 * DIFF_CONTEXT)
+  const minus = blocked.filter(l => l.trim() !== '' && !near(l, wide)).slice(0, 3)
+  const anchor = all.findIndex((l, i) => i >= line - 1 - 3 * DIFF_CONTEXT && near(l, blocked) && !near(l, minus))
+  const start = Math.max(0, (anchor < 0 ? line - 1 - DIFF_CONTEXT : anchor))
+  const plus = all.slice(start, start + 2 * DIFF_CONTEXT + 4).filter(l => l.trim() !== '' && !near(l, blocked)).slice(0, 3)
+  if (minus.length + plus.length === 0) return undefined
+  // Keep the lines' shape (YAML indentation matters), minus the indent they share.
+  const indent = Math.min(...[...minus, ...plus].map(l => l.length - l.trimStart().length))
+  const show = (l: string) => shown({ id, snippet: l.slice(indent).trimEnd() }).slice(0, 120)
+  return { minus: minus.map(show), plus: plus.map(show) }
 }
 
 const lessonFor = (opts: Opts) =>
@@ -87,13 +109,31 @@ const record = async ($: $, event: GuardEvent, delta: Partial<Totals>) => {
   }))
   await update($, isBandHidden, () => false)
   $.ui.status(statusLine(next))
-  const lifetime = ((await $.store.get(LIFETIME)) ?? {}) as Partial<Totals>
-  await $.store.set(LIFETIME, {
-    blocked: (lifetime.blocked ?? 0) + (delta.blocked ?? 0),
-    warned: (lifetime.warned ?? 0) + (delta.warned ?? 0),
-    fixed: (lifetime.fixed ?? 0) + (delta.fixed ?? 0),
-    cloud: (lifetime.cloud ?? 0) + (delta.cloud ?? 0),
+  const add = (t: Partial<Totals> | undefined): Totals => ({
+    blocked: (t?.blocked ?? 0) + (delta.blocked ?? 0),
+    warned: (t?.warned ?? 0) + (delta.warned ?? 0),
+    fixed: (t?.fixed ?? 0) + (delta.fixed ?? 0),
+    cloud: (t?.cloud ?? 0) + (delta.cloud ?? 0),
   })
+  await $.store.set(LIFETIME, add((await $.store.get(LIFETIME)) as Partial<Totals> | undefined))
+  const weeks = ((await $.store.get(WEEKS)) ?? {}) as Record<string, Totals>
+  const week = weekOf(Date.now())
+  await $.store.set(WEEKS, Object.fromEntries([...Object.entries(weeks), [week, add(weeks[week])]].slice(-12)))
+}
+
+/** Once per week, at the first session: what the guard did last week. */
+const weeklyRecap = async ($: $) => {
+  const last = weekOf(Date.now() - 7 * 86_400_000)
+  if ((await $.store.get(RECAP_SHOWN)) === last) return
+  const t = (((await $.store.get(WEEKS)) ?? {}) as Record<string, Totals>)[last]
+  await $.store.set(RECAP_SHOWN, last)
+  if (t === undefined || t.blocked + t.fixed + t.cloud === 0) return
+  const parts = [
+    t.blocked && `stopped ${t.blocked} issue(s)`,
+    t.fixed && `Claude fixed ${t.fixed}`,
+    t.cloud && `checked ${t.cloud} cloud command(s)`,
+  ].filter(Boolean)
+  $.ui.toast(`🛡 Last week Shift-Left Guard ${parts.join(', ')}.`, { timeoutMs: 8000 })
 }
 
 const brief = (findings: readonly Finding[]) =>
@@ -322,6 +362,82 @@ async function checkShellWrites(
   }
 }
 
+/** Scans every tracked file of the repository as it is on disk, and scores it. */
+async function runAudit($: $): Promise<Audit | string> {
+  const top = (await git($, ['rev-parse', '--show-toplevel']))?.trim()
+  if (!top) return 'Not inside a git repository.'
+  // Tracked files and new ones git does not ignore: what the next commit could hold.
+  const listed = await git($, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], top)
+  if (listed === undefined) return 'Could not list the files of this repository.'
+  const config = await configOf($, top)
+  const paths = [...new Set(listed.split('\0').filter(Boolean))]
+  const found: AuditFinding[] = []
+  let scanned = 0
+  for (const rel of paths.slice(0, MAX_AUDIT_FILES)) {
+    const path = `${top}/${rel}`
+    const text = await $.fs.read(path).catch(() => undefined)
+    if (text === undefined || text.length > MAX_FILE_BYTES || text.includes('\0')) continue
+    if (isEnvFile(path) && !config.disabled.has('SEC004') && envHasSecrets(text)) found.push({ path: rel, ...briefOne(envFinding(path)) })
+    scanned += 1
+    found.push(...scan(path, text, config).map(f => ({ path: rel, ...briefOne(f) })))
+  }
+  found.sort((a, b) => rank(b.severity) - rank(a.severity))
+  const { score, grade } = scoreOf(found)
+  const counts = { critical: 0, high: 0, medium: 0, low: 0 }
+  for (const f of found) counts[f.severity] += 1
+  return {
+    at: Date.now(),
+    top,
+    score,
+    grade,
+    scanned,
+    isTruncated: paths.length > MAX_AUDIT_FILES,
+    counts,
+    findings: found.slice(0, MAX_AUDIT_LISTED),
+  }
+}
+
+/** Rewrites the committed badge file, if the repository has one, so the live badge shows this audit. */
+const refreshBadgeFile = async ($: $, a: Audit, create = false) => {
+  const path = `${a.top}/${BADGE_FILE}`
+  if (!create && (await $.fs.read(path).catch(() => undefined)) === undefined) return false
+  await $.fs.write(path, badgeJson(a.score, a.grade))
+  return true
+}
+
+/** The live badge's URL: the badge file on the default branch of the GitHub remote. */
+const liveBadgeUrl = async ($: $, top: string) => {
+  const remote = await git($, ['remote', 'get-url', 'origin'], top)
+  const head = (await git($, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], top))?.trim().replace(/^origin\//, '')
+  return remote === undefined ? undefined : badgeFileUrl(remote, head || 'main')
+}
+
+const briefOne = ({ id, severity, title, line }: Finding) => ({ id, severity, title, line })
+
+const auditText = (a: Audit) =>
+  [
+    `🛡 Security score: ${a.score}/100 · grade ${a.grade}`,
+    `${a.scanned} files scanned${a.isTruncated ? ` (first ${MAX_AUDIT_FILES})` : ''} · ${a.counts.critical} critical · ${a.counts.high} high · ${a.counts.medium} medium · ${a.counts.low} low`,
+    '',
+    ...(a.findings.length === 0
+      ? ['Nothing found. Add the badge to your README: /guard badge']
+      : [
+          'Top findings:',
+          ...a.findings.slice(0, 8).map(f => `  ${f.severity.padEnd(8)} ${f.id.padEnd(7)} ${f.path}:${f.line}  ${f.title}`),
+          '',
+          'Let Claude fix them: /guard fix (puts the request in your prompt; press Enter to send). Details: /guard pane · Badge: /guard badge',
+        ]),
+  ].join('\n')
+
+/** The request that hands the audit's findings to Claude, most severe first. */
+const fixPrompt = (a: Audit) =>
+  [
+    'Fix the security findings from the shift-left-guard audit, most severe first.',
+    'Keep behaviour the same. If a finding is a false positive, tell me why instead of silencing it.',
+    '',
+    ...a.findings.slice(0, 20).map(f => `- ${f.path}:${f.line} ${f.id} (${f.severity}) ${f.title}`),
+  ].join('\n')
+
 const HOOK_LINE = (blockAt: string) =>
   `node "$(git rev-parse --git-dir)/shift-left-guard/guard-scan.mjs" --block-at=${blockAt} || exit 1`
 
@@ -483,10 +599,11 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'guard',
-      description: 'Shift-Left Guard: report, findings pane, rules, pre-commit hook, pause or resume',
-      argumentHint: '[report|pane|rules|install-hook|pause|resume]',
+      description: 'Shift-Left Guard: report, security audit and score, findings pane, rules, pre-commit hook, pause or resume',
+      argumentHint: '[report|audit|fix|badge|pane|rules|install-hook|pause|resume]',
     })
     $.ui.status(statusLine(await read($, totals)))
+    await weeklyRecap($).catch(() => undefined)
     return next(e)
   })
 
@@ -502,6 +619,41 @@ export const register: Register = (on, options) => {
     if (arg === 'pane') {
       await $.ui.open({ id: PANE, title: 'Shift-Left Guard' })
       return { text: 'Findings pane opened.' }
+    }
+
+    if (arg === 'audit') {
+      const result = await runAudit($)
+      if (typeof result === 'string') return { text: result }
+      await update($, audit, () => result)
+      const isBadgeUpdated = await refreshBadgeFile($, result).catch(() => false)
+      return { text: `${auditText(result)}${isBadgeUpdated ? `\n\nBadge updated: ${BADGE_FILE} (commit it to publish).` : ''}` }
+    }
+
+    if (arg === 'fix' || arg === 'badge') {
+      const last = (await read($, audit)) ?? (await runAudit($))
+      if (typeof last === 'string') return { text: last }
+      await update($, audit, () => last)
+      if (arg === 'badge') {
+        const url = await liveBadgeUrl($, last.top)
+        if (url === undefined) {
+          return {
+            text: [`Grade ${last.grade} (${last.score}/100). Add this to your README:`, '', badgeMarkdown(last.grade), '', 'This badge is a fixed image: run /guard badge again after fixes.'].join('\n'),
+          }
+        }
+        await refreshBadgeFile($, last, true)
+        return {
+          text: [
+            `Grade ${last.grade} (${last.score}/100). Wrote ${BADGE_FILE}; commit it, then add this to your README:`,
+            '',
+            badgeMarkdown(last.grade, url),
+            '',
+            `The badge reads ${BADGE_FILE} from your default branch, so every /guard audit (or \`guard-scan --all --badge-file\` in CI) that you commit updates it.`,
+          ].join('\n'),
+        }
+      }
+      if (last.findings.length === 0) return { text: 'The last audit found nothing to fix.' }
+      const filled = await $.prompt.fill({ text: fixPrompt(last) })
+      return { text: filled.isFilled ? 'The fix request is in your prompt. Press Enter to send it to Claude.' : fixPrompt(last) }
     }
 
     if (arg === 'install-hook') {
@@ -566,20 +718,26 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box>
-          <Text bold>🛡 Shift-Left Guard </Text>
-          <Text color={color}>{text} </Text>
+          <Box flexShrink={0}>
+            <Text bold>🛡 Shift-Left Guard </Text>
+          </Box>
+          <Box flexShrink={1}>
+            <Text color={color} wrap="truncate-end">
+              {text}{' '}
+            </Text>
+          </Box>
           <Button key="report" label="Report" onPress={() => $.ui.open({ id: PANE, title: 'Shift-Left Guard' })} />
           <Text> </Text>
           <Button key="hide" label="Hide" onPress={() => update($, isBandHidden, () => true)} />
         </Box>
         {diff?.minus.map((l, i) => (
-          <Text key={`m${i}`} color="red">
+          <Text key={`m${i}`} color="red" wrap="truncate-end">
             {'   - '}
             {l}
           </Text>
         ))}
         {diff?.plus.map((l, i) => (
-          <Text key={`p${i}`} color="green">
+          <Text key={`p${i}`} color="green" wrap="truncate-end">
             {'   + '}
             {l}
           </Text>
@@ -594,11 +752,12 @@ export const register: Register = (on, options) => {
     const { Box, Text } = $.ui.resolve(e)
     const ids = verdict.ids.join(', ')
     const [color, label] = BADGE[verdict.action as Verdict](ids)
+    // Under the row, like the engine's own result line: beside it, a long row would push the mark off the edge.
     return (
-      <Box>
+      <Box flexDirection="column">
         {await next(e)}
         <Text color={color} dimColor={verdict.action === 'clean'}>
-          {'  🛡 '}
+          {'  ⎿  🛡 '}
           {label}
         </Text>
       </Box>
@@ -606,7 +765,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const t = await read($, totals)
     const list = (await read($, events)).slice().reverse()
     const room = Math.max(4, (e.viewport?.rows ?? 30) - 6)
@@ -637,13 +796,46 @@ export const register: Register = (on, options) => {
       }),
     ])
 
+    const last = await read($, audit)
+    const gradeColor = { A: 'green', B: 'green', C: 'yellow', D: 'yellow', F: 'red' } as const
+    const auditRows =
+      last === null
+        ? []
+        : [
+            <Box key="audit">
+              <Text bold color={gradeColor[last.grade]}>
+                Grade {last.grade} · {last.score}/100{' '}
+              </Text>
+              <Text dimColor>
+                {last.counts.critical} critical · {last.counts.high} high · {last.counts.medium} medium · {last.counts.low} low{' '}
+              </Text>
+              {last.findings.length > 0 && (
+                <Button
+                  key="fix"
+                  label="Fix with Claude"
+                  onPress={async () => {
+                    await $.prompt.fill({ text: fixPrompt(last) })
+                  }}
+                />
+              )}
+            </Box>,
+            ...last.findings.slice(0, 5).map(f => (
+              <Text key={`a${f.path}${f.id}${f.line}`} dimColor>
+                {'  '}
+                {f.severity} {f.id} {f.path}:{f.line} {f.title}
+              </Text>
+            )),
+            <Text key="audit-gap"> </Text>,
+          ]
+
     return (
       <Box flexDirection="column">
+        {auditRows}
         <Text>
           {t.blocked} caught · {t.fixed} fixed · {t.warned} warned · {t.cloud} cloud
         </Text>
         <Text> </Text>
-        {rows.length === 0 ? <Text dimColor>Nothing caught yet.</Text> : rows.slice(0, room)}
+        {rows.length === 0 ? <Text dimColor>Nothing caught yet.</Text> : rows.slice(0, room - auditRows.length)}
       </Box>
     )
   })
