@@ -13,13 +13,63 @@ type Rule = {
   severity: Severity
   title: string
   fix: string
-  /** Line-level rules: the line and its 0-based index; return true to flag. */
-  line?: (line: string, ctx: LineContext) => boolean
+  /**
+   * Line-level rules: the line and its context; return true to flag at the
+   * rule's severity, or a severity to flag this one finding at that level.
+   */
+  line?: (line: string, ctx: LineContext) => boolean | Severity
   /** File-level rules: return the 0-based line to flag, or -1. */
   file?: (lines: readonly string[]) => number
 }
 
 type LineContext = { inRunBlock: boolean; text: string; lines: readonly string[]; index: number }
+
+/**
+ * The HCL block a line sits in: its header line and its whole body, found by
+ * brace balance, so a rule can read the sibling attributes of a line.
+ */
+const enclosingBlock = (lines: readonly string[], index: number) => {
+  const braces = (l: string) => (l.match(/\{/g)?.length ?? 0) - (l.match(/\}/g)?.length ?? 0)
+  let depth = 0
+  let start = 0
+  for (let i = index - 1; i >= 0; i--) {
+    depth += braces(lines[i] ?? '')
+    if (depth > 0) {
+      start = i
+      break
+    }
+  }
+  let end = lines.length - 1
+  depth = 0
+  for (let i = start; i < lines.length; i++) {
+    depth += braces(lines[i] ?? '')
+    if (depth <= 0 && i > start) {
+      end = i
+      break
+    }
+  }
+  return { header: lines[start] ?? '', body: lines.slice(start, end + 1).join('\n') }
+}
+
+const WEB_PORTS = new Set([80, 443])
+
+/** Ports a firewall/security-group block opens, or undefined when it names none. */
+const portsOf = (body: string): number[] | undefined => {
+  const ports = [
+    ...[...body.matchAll(/\b(from_port|to_port|port|destination_port_range)\s*=\s*"?(\d+)"?/g)].map(m => Number(m[2])),
+    ...[...body.matchAll(/\bports\s*=\s*\[([^\]]*)\]/g)].flatMap(m => [...(m[1] ?? '').matchAll(/\d+/g)].map(n => Number(n[0]))),
+  ]
+  return ports.length === 0 ? undefined : ports
+}
+
+/**
+ * Whether a secret-named setting holds a reference rather than a secret: a
+ * URL, a path, a variable, a number or boolean, or a name that says so
+ * (`API_KEY_FILE`, `token_url`, `password_length`).
+ */
+const isReference = (name: string, value: string) =>
+  /_(FILE|PATH|DIR|URL|URI|ENDPOINT|NAME|ID|ARN|REF|VERSION|LENGTH|POLICY|TYPE|ROTATION|TTL|MODE|ALGORITHM|COUNT|HEADER)$/i.test(name) ||
+  /^["']?(\$\{?[\w.]+\}?|[a-z][\w+.-]*:\/\/\S*|\.{0,2}\/\S*|\d+|true|false|yes|no|on|off)["']?$/i.test(value.trim())
 
 const FULL_SHA = /^[0-9a-f]{40}$/
 
@@ -67,8 +117,8 @@ export const RULES: readonly Rule[] = [
     id: 'GHA003',
     kind: 'workflow',
     severity: 'high',
-    title: 'Script injection: untrusted event data in run:',
-    fix: 'Move the expression into `env:` (e.g. `env: TITLE: ${{ github.event.issue.title }}`) and use `"$TITLE"` in the script.',
+    title: 'Script injection: untrusted event data in run:/script:',
+    fix: 'Move the expression into `env:` (e.g. `env: TITLE: ${{ github.event.issue.title }}`) and use `"$TITLE"` in the script; in actions/github-script read `process.env.TITLE` or `context.payload`.',
     line: (line, ctx) => ctx.inRunBlock && INJECTABLE.test(line),
   },
   {
@@ -94,7 +144,7 @@ export const RULES: readonly Rule[] = [
     id: 'GHA006',
     kind: 'workflow',
     severity: 'medium',
-    title: 'Secret interpolated directly into run:',
+    title: 'Secret interpolated directly into run:/script:',
     fix: 'Pass secrets through `env:` and reference `"$MY_SECRET"`; inline `${{ secrets.X }}` ends up in the generated script and process list.',
     line: (line, ctx) => ctx.inRunBlock && /\$\{\{\s*secrets\.(?!GITHUB_TOKEN\b)/.test(line),
   },
@@ -124,13 +174,28 @@ export const RULES: readonly Rule[] = [
     title: 'Container runs as root',
     fix: 'Create an unprivileged user and switch to it before CMD: `RUN useradd -r -u 10001 app` + `USER app`.',
     file: lines => {
-      const users = lines.map((l, i) => [i, /^\s*USER\s+(\S+)/i.exec(l)?.[1]] as const).filter(([, u]) => u)
-      const last = users.at(-1)
-      if (last === undefined) {
-        const from = lines.findLastIndex(l => /^\s*FROM\s/i.test(l))
-        return from
+      // Only the final stage runs; a stage built FROM another inherits its USER.
+      const stages = lines.flatMap((l, i) => {
+        const m = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?/i.exec(l)
+        return m ? [{ start: i, image: (m[1] ?? '').toLowerCase(), alias: m[2]?.toLowerCase() }] : []
+      })
+      const userIn = (stage: number, seen: number): { user: string; at: number } | undefined => {
+        const s = stages[stage]
+        if (s === undefined || seen > stages.length) return undefined
+        const end = stages[stage + 1]?.start ?? lines.length
+        for (let i = end - 1; i > s.start; i--) {
+          const user = /^\s*USER\s+(\S+)/i.exec(lines[i] ?? '')?.[1]
+          if (user !== undefined) return { user, at: i }
+        }
+        if (/nonroot|rootless/.test(s.image)) return { user: 'nonroot', at: s.start }
+        const parent = stages.findIndex(p => p.alias === s.image)
+        return parent >= 0 && parent < stage ? userIn(parent, seen + 1) : undefined
       }
-      return last[1] === 'root' || last[1] === '0' || last[1]?.startsWith('0:') ? last[0] : -1
+      const last = stages.length - 1
+      if (last < 0) return -1
+      const found = userIn(last, 0)
+      if (found === undefined) return stages[last]?.start ?? -1
+      return /^(root|0)(:|$)/.test(found.user) ? found.at : -1
     },
   },
   {
@@ -141,7 +206,8 @@ export const RULES: readonly Rule[] = [
     fix: 'Never put secrets in ENV/ARG (they stay in the image history). Use `RUN --mount=type=secret,id=...` at build time and inject at runtime from a secret manager.',
     line: line => {
       const m = /^\s*(ENV|ARG)\s+(\S+?)(?:[=\s]+(.*))?$/i.exec(line)
-      return m !== null && SECRET_NAME.test(m[2] ?? '') && m[3] !== undefined && m[3].trim() !== ''
+      const [name, value] = [m?.[2] ?? '', m?.[3]?.trim() ?? '']
+      return SECRET_NAME.test(name) && value !== '' && !isReference(name, value)
     },
   },
   {
@@ -167,8 +233,17 @@ export const RULES: readonly Rule[] = [
     kind: 'terraform',
     severity: 'high',
     title: 'Open to the whole internet (0.0.0.0/0)',
-    fix: 'Restrict source ranges to known CIDRs, a load balancer or IAP (GCP: 35.235.240.0/20), or use private networking.',
-    line: line => /(0\.0\.0\.0\/0|::\/0)/.test(line) && !/egress|destination/i.test(line) && !isComment(line),
+    fix: 'Restrict source ranges to known CIDRs, a load balancer or IAP (GCP: 35.235.240.0/20), or use private networking. Ports 80/443 on a public load balancer are expected: confirm it is one.',
+    line: (line, ctx) => {
+      if (isComment(line) || !/(0\.0\.0\.0\/0|::\/0)/.test(line) || /egress|destination/i.test(line)) return false
+      const { header, body } = enclosingBlock(ctx.lines, ctx.index)
+      const isOutbound =
+        /\b(egress|route)\b|aws_route/.test(header) ||
+        /\btype\s*=\s*"egress"|\bdirection\s*=\s*"(EGRESS|Outbound)"/i.test(body)
+      if (isOutbound) return false
+      const ports = portsOf(body)
+      return ports !== undefined && ports.every(p => WEB_PORTS.has(p)) ? 'medium' : true
+    },
   },
   {
     id: 'TF002',
@@ -194,9 +269,9 @@ export const RULES: readonly Rule[] = [
   {
     id: 'TF004',
     kind: 'terraform',
-    severity: 'high',
+    severity: 'medium',
     title: 'Database reachable from a public IP',
-    fix: 'Use private IP / private endpoints. GCP Cloud SQL: `ipv4_enabled = false` + `private_network`; AWS RDS: `publicly_accessible = false`.',
+    fix: 'Use private IP / private endpoints. GCP Cloud SQL: `ipv4_enabled = false` + `private_network`, or keep public IP only with the Cloud SQL connector, IAM auth and no `authorized_networks`; AWS RDS: `publicly_accessible = false`.',
     line: line => !isComment(line) && /(publicly_accessible|ipv4_enabled)\s*=\s*true/.test(line),
   },
   {
@@ -205,10 +280,10 @@ export const RULES: readonly Rule[] = [
     severity: 'critical',
     title: 'Hard-coded secret in Terraform',
     fix: 'Reference a secret manager (`google_secret_manager_secret_version`, `aws_secretsmanager_secret_version`, `azurerm_key_vault_secret`) or a `sensitive = true` variable; generate passwords with `random_password`.',
-    line: line =>
-      !isComment(line) &&
-      /^\s*\w*(password|secret|token|api_key|private_key|access_key)\w*\s*=\s*"(?!\$\{)[^"]{4,}"/i.test(line) &&
-      !/(_name|_id|_arn|_version|_ref)\s*=/.test(line),
+    line: line => {
+      const m = /^\s*(\w*(password|secret|token|api_key|private_key|access_key)\w*)\s*=\s*"([^"]{4,})"/i.exec(line)
+      return !isComment(line) && m !== null && !(m[3] ?? '').startsWith('${') && !isReference(m[1] ?? '', m[3] ?? '')
+    },
   },
   {
     id: 'TF006',
@@ -275,7 +350,15 @@ export const RULES: readonly Rule[] = [
     severity: 'critical',
     title: 'Private key',
     fix: 'Remove the key from the file, rotate it, and load it from a secret manager or a mounted secret at runtime.',
-    line: line => /-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY( BLOCK)?-----/.test(line),
+    // A header alone (docs, commented examples) is no key: key material must follow,
+    // on the same line (JSON service-account keys, `\n`-escaped) or the next one.
+    line: (line, ctx) => {
+      const header = /-----BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY( BLOCK)?-----/.exec(line)
+      if (header === null) return false
+      const rest = line.slice(header.index + header[0].length).replace(/\\n/g, '')
+      const next = (ctx.lines[ctx.index + 1] ?? '').replace(/^[\s#/*'"|-]+/, '')
+      return /[A-Za-z0-9+/]{40,}/.test(rest) || /^[A-Za-z0-9+/=]{40,}/.test(next)
+    },
   },
   {
     id: 'SEC002',
@@ -317,11 +400,11 @@ export const scan = (path: string, text: string): Finding[] => {
   const findings: Finding[] = []
   const rules = RULES.filter(r => r.kind === kind || (r.kind === 'any' && !SKIP_SECRETS.test(path)))
 
-  const add = (rule: Rule, index: number) => {
+  const add = (rule: Rule, index: number, severity = rule.severity) => {
     if (isIgnored(lines, index, rule.id)) return
     findings.push({
       id: rule.id,
-      severity: rule.severity,
+      severity,
       title: rule.title,
       fix: rule.fix,
       line: index + 1,
@@ -332,17 +415,19 @@ export const scan = (path: string, text: string): Finding[] => {
   let runIndent = -1
   lines.forEach((line, index) => {
     const indent = line.length - line.trimStart().length
-    const run = /^(\s*)(-\s*)?run:\s*(.*)$/.exec(line)
+    // `run:` and `script:` (actions/github-script, ssh actions) both execute their text.
+    const run = /^(\s*)(-\s*)?(run|script):\s*(.*)$/.exec(line)
     let inRunBlock = false
     if (run) {
       inRunBlock = true
-      runIndent = /^[|>]/.test(run[3] ?? '') ? indent : -1
+      runIndent = /^[|>]/.test(run[4] ?? '') ? indent : -1
     } else if (runIndent >= 0) {
       if (line.trim() === '' || indent > runIndent) inRunBlock = true
       else runIndent = -1
     }
     for (const rule of rules) {
-      if (rule.line?.(line, { inRunBlock, text, lines, index })) add(rule, index)
+      const hit = rule.line?.(line, { inRunBlock, text, lines, index })
+      if (hit) add(rule, index, hit === true ? rule.severity : hit)
     }
   })
 
@@ -387,7 +472,7 @@ const SECRET_RULES = new Set(['SEC001', 'SEC002', 'DKR003', 'TF005'])
 export const mask = (line: string) =>
   line
     .replace(/([=:]\s*["']?)([^"'\s,;)]{4,})/g, (_, lead: string, value: string) => `${lead}${value.slice(0, 3)}****`)
-    .replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}/g, '$1****')
+    .replace(/\b([A-Za-z0-9_-]{3})[A-Za-z0-9_\-+/]{12,}\b(?!\s*[=:])/g, '$1****')
 
 export const formatFindings = (path: string, findings: readonly Finding[]) =>
   findings

@@ -119,27 +119,27 @@ Only the changed file is scanned, and only what the change introduces is reporte
 |---|---|---|
 | GHA001 | medium | Third-party action not pinned to a commit SHA |
 | GHA002 | critical | `pull_request_target` checking out untrusted PR code |
-| GHA003 | high | Script injection: `${{ github.event.*.title/body/… }}` inside `run:` |
+| GHA003 | high | Script injection: `${{ github.event.*.title/body/… }}` inside `run:` or `script:` (actions/github-script) |
 | GHA004 | high | `permissions: write-all` |
 | GHA005 | low | No top-level `permissions:` block |
-| GHA006 | medium | `${{ secrets.X }}` interpolated directly into `run:` |
+| GHA006 | medium | `${{ secrets.X }}` interpolated directly into `run:` / `script:` |
 | DKR001 | medium | Base image `:latest` or untagged |
-| DKR002 | medium | Container runs as root |
-| DKR003 | high | Secret baked in via `ENV`/`ARG` |
+| DKR002 | medium | Final stage runs as root (follows `FROM <stage>`, accepts `:nonroot` images) |
+| DKR003 | high | Secret baked in via `ENV`/`ARG` (skips `*_FILE`, URLs, paths, `$VARS`) |
 | DKR004 | low | `ADD` instead of `COPY` |
 | DKR005 | medium | `curl … \| sh` |
-| TF001 | high | `0.0.0.0/0` ingress (GCP firewall, AWS SG, Azure NSG) |
+| TF001 | high · medium | `0.0.0.0/0` ingress (GCP firewall, AWS SG, Azure NSG); medium when only ports 80/443 are open, egress and routes are ignored |
 | TF002 | high | Public buckets/resources: `allUsers`, `public-read`, S3 public access block off, Azure public network access |
 | TF003 | high | `roles/owner`/`roles/editor`, `AdministratorAccess`, `"Action": "*"`, Azure `Owner`/`Contributor` |
-| TF004 | high | Database on a public IP (Cloud SQL `ipv4_enabled`, RDS `publicly_accessible`) |
-| TF005 | critical | Hard-coded password/secret/token |
+| TF004 | medium | Database on a public IP (Cloud SQL `ipv4_enabled`, RDS `publicly_accessible`) |
+| TF005 | critical | Hard-coded password/secret/token (skips URLs, numbers, `*_url`, `*_length`, …) |
 | TF006 | medium | Encryption at rest / HTTPS-only disabled |
 | TF007 | low | `deletion_protection = false` |
 | K8S001 | high | `privileged: true` |
 | K8S002 | medium | `hostNetwork`/`hostPID`/`hostIPC`/`hostPath` |
 | K8S003 | medium | `allowPrivilegeEscalation: true`, `runAsUser: 0` |
 | K8S004 | low | Image `:latest` or untagged |
-| SEC001 | critical | Private keys (any file) |
+| SEC001 | critical | Private keys with key material (any file; a bare header in docs is ignored) |
 | SEC002 | critical | AWS, GCP API, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI keys (any file) |
 
 `allUsers` on `roles/run.invoker` / `roles/cloudfunctions.invoker` is allowed, because that is how a public Cloud Run service is exposed.
