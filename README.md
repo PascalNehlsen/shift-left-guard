@@ -9,7 +9,9 @@
 
 **Claude writes the code. Shift-Left Guard makes sure it is safe before it lands on your disk.**
 
-![Claude copies a workflow template with a script injection; the guard catches it, Claude fixes it, and the band shows the diff](docs/demo.gif)
+<p align="center">
+  <img src="docs/demo.gif" width="900" alt="Claude copies a workflow template with a script injection; the guard catches it, Claude fixes it, and the band shows the diff">
+</p>
 
 - **Insecure code never lands.** Workflows, Dockerfiles, Terraform, Kubernetes, Compose files and `package.json` are checked on every write. Claude gets the finding and fixes it itself.
 - **Your agent's own config is guarded too.** Wildcard permissions in `.claude/settings.json`, unpinned MCP servers, tokens in `.mcp.json`, prompt injection hidden in `CLAUDE.md`.
@@ -23,7 +25,7 @@ Runs locally inside Claude Code: no API keys, no network, nothing to configure.
 
 You need Claude Code **2.1.287 or newer** (`claude --version`). In a Claude Code session:
 
-```
+```text
 /plugin install shift-left-guard --marketplace PascalNehlsen/shift-left-guard
 ```
 
@@ -33,7 +35,7 @@ Answer `y` to add the marketplace, then pick **user scope** to guard every proje
 
 The guard is silent until it finds something. To see it work right away, open one of your repositories and run:
 
-```
+```text
 /guard audit
 ```
 
@@ -59,8 +61,8 @@ Then `/guard fix` puts a fix request for all findings into your prompt: press En
 
 ## Commands
 
-| Command | |
-|---|---|
+| Command | What it does |
+| --- | --- |
 | `/guard audit` | Score and grade the repository |
 | `/guard fix` | Hand the audit's findings to Claude (fills your prompt; you press Enter) |
 | `/guard badge` | Live README badge for your score |
