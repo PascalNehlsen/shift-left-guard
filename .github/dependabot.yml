@@ -15,7 +15,7 @@ updates:
 
   # Bumps the pinned Claude Code CLI; CI runs the plugin tests against it.
   - package-ecosystem: npm
-    directory: /
+    directory: /dev
     schedule:
       interval: weekly
     cooldown:

@@ -11,7 +11,7 @@
 The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](../bin/guard-scan.mjs), with no dependencies. Download it from a release tag and run it in any pipeline that has Node:
 
 ```yaml
-- run: curl -fsSLO https://raw.githubusercontent.com/PascalNehlsen/shift-left-guard/v0.3.0/bin/guard-scan.mjs
+- run: curl -fsSLO https://raw.githubusercontent.com/PascalNehlsen/shift-left-guard/v0.3.1/bin/guard-scan.mjs
 - run: node guard-scan.mjs --all --block-at=high
 ```
 

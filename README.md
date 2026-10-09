@@ -9,9 +9,11 @@
 
 <p align="center"><b>Claude writes the code. Shift-Left Guard makes sure it is safe before it lands on your disk.</b></p>
 
-<p align="center">
-  <img src="docs/demo.gif" width="900" alt="Claude copies a workflow template with a script injection; the guard catches it, Claude fixes it, and the band shows the diff">
-</p>
+<div align="center">
+
+![Claude copies a workflow template with a script injection; the guard catches it, Claude fixes it, and the band shows the diff](docs/demo.gif)
+
+</div>
 
 - **Insecure code never lands.** Workflows, Dockerfiles, Terraform, Kubernetes, Compose files and `package.json` are checked on every write. Claude gets the finding and fixes it itself.
 - **Your agent's own config is guarded too.** Wildcard permissions in `.claude/settings.json`, unpinned MCP servers, tokens in `.mcp.json`, prompt injection hidden in `CLAUDE.md`.
@@ -93,6 +95,12 @@ No. The guard checks with local rules, makes no model calls and no network reque
 </details>
 
 <details>
+<summary><b>What does it run on my machine?</b></summary>
+
+Everything it does goes through Claude Code's mod API and stays on your machine: it reads the file Claude is changing (and, for `/guard audit`, the files of the repository), runs `git` to find changed and ignored files, and keeps counters in the plugin's own store. It writes files only when you ask: `/guard install-hook` writes `.git/hooks/pre-commit` and a copy of the scanner into `.git/`, and `/guard badge` and `/guard audit` write `.github/shift-left-guard.json`. It installs no packages, makes no network requests and calls no model. `claude plugin validate .` lists every call it makes.
+</details>
+
+<details>
 <summary><b>Does it slow Claude down?</b></summary>
 
 No noticeable delay: a check is a few regular expressions over the one file being written.
@@ -121,6 +129,6 @@ No. A sandbox limits what Claude can *reach*; the guard limits what Claude *prod
 
 ## Contributing
 
-New rules, fewer false positives and better fix texts are very welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). To work on the guard, run `npm ci && npm test`, then `claude --plugin-dir .` (disable the installed copy first, or every finding shows twice). Security issues in the guard itself go through [SECURITY.md](SECURITY.md).
+New rules, fewer false positives and better fix texts are very welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). To work on the guard, run `npm ci --prefix dev && npm --prefix dev test`, then `claude --plugin-dir .` (disable the installed copy first, or every finding shows twice). Security issues in the guard itself go through [SECURITY.md](SECURITY.md).
 
 MIT, built by [Pascal Nehlsen](https://github.com/PascalNehlsen).
