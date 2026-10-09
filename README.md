@@ -1,4 +1,4 @@
-# 🛡 Shift-Left Guard
+<h1 align="center">🛡 Shift-Left Guard</h1>
 
 <p align="center">
   <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -7,7 +7,7 @@
   <a href="https://github.com/PascalNehlsen/shift-left-guard"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FPascalNehlsen%2Fshift-left-guard%2Fmain%2F.github%2Fshift-left-guard.json" alt="shift-left-guard score"></a>
 </p>
 
-**Claude writes the code. Shift-Left Guard makes sure it is safe before it lands on your disk.**
+<p align=center>**Claude writes the code. Shift-Left Guard makes sure it is safe before it lands on your disk.**</p>
 
 <p align="center">
   <img src="docs/demo.gif" width="900" alt="Claude copies a workflow template with a script injection; the guard catches it, Claude fixes it, and the band shows the diff">
