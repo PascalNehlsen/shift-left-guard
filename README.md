@@ -103,7 +103,7 @@ Everything it does goes through Claude Code's mod API and stays on your machine:
 <details>
 <summary><b>Does it slow Claude down?</b></summary>
 
-No noticeable delay: a check is a few regular expressions over the one file being written.
+Checking a file Claude writes takes about a millisecond (measured: 0.1 to 1.3 ms for files up to 750 lines). After a shell command that may have written files, the guard asks git which files changed: a few milliseconds in a small repository, 0.2 to 0.5 s in a large one (measured on n8n, 30,000 files). Commands that only read, such as `ls`, `cat`, `grep` or `git status`, skip that step.
 </details>
 
 <details>

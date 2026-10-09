@@ -786,6 +786,53 @@ var BADGE_FILE = ".github/shift-left-guard.json";
 var badgeJson = (score, grade) => `${JSON.stringify({ schemaVersion: 1, label: "shift-left-guard", message: `${grade} · ${score}/100`, color: GRADE_COLOR[grade] }, null, 2)}
 `;
 var badgeMarkdown = (grade, fileUrl) => fileUrl === undefined ? `[![shift-left-guard: ${grade}](https://img.shields.io/badge/shift--left--guard-${grade}-${GRADE_COLOR[grade]})](${GUARD_URL})` : `[![shift-left-guard](https://img.shields.io/endpoint?url=${encodeURIComponent(fileUrl)})](${GUARD_URL})`;
+var READ_ONLY = new Set([
+  "ls",
+  "cat",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "grep",
+  "egrep",
+  "rg",
+  "ag",
+  "wc",
+  "pwd",
+  "echo",
+  "printf",
+  "which",
+  "type",
+  "file",
+  "stat",
+  "du",
+  "df",
+  "tree",
+  "jq",
+  "yq",
+  "diff",
+  "cmp",
+  "sort",
+  "uniq",
+  "cut",
+  "tr",
+  "basename",
+  "dirname",
+  "realpath",
+  "readlink",
+  "date",
+  "whoami",
+  "id",
+  "uname",
+  "env",
+  "printenv",
+  "true",
+  "test",
+  "[",
+  "nl",
+  "column"
+]);
+var READ_ONLY_GIT = new Set(["status", "log", "diff", "show", "branch", "rev-parse", "ls-files", "blame", "remote", "describe", "tag"]);
 
 // cli/guard-scan.ts
 var args = process.argv.slice(2);
