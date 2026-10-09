@@ -28,7 +28,7 @@ Try your local copy in a real session with `claude --plugin-dir .`.
 2. Add a test to [`tests/rules.test.ts`](tests/rules.test.ts) with at least **one positive and one negative example**. The negative example is the safe code that must *not* be flagged.
 3. If the rule matches values that are secrets, add its ID to `SECRET_RULES` so findings are masked.
 4. Run `bun run build` and commit `bin/guard-scan.mjs` together with your rule. CI fails if the bundle is out of date.
-5. Add the rule to the table in the README.
+5. Add the rule to the table in [`docs/rules.md`](docs/rules.md) (and the "why" with its CWE to `EXPLAIN` in `hooks/rules.ts`).
 
 > [!TIP]
 > Before opening the PR, run your rule against a few real repos. A rule that is noisy on real code gets switched off by users, and then it protects nobody.
