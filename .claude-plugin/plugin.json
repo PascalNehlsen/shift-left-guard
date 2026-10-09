@@ -1,0 +1,25 @@
+{
+  "name": "shift-left-guard",
+  "version": "0.1.0",
+  "description": "DevSecOps guardrails for Claude: scans every workflow, Dockerfile, Terraform, Kubernetes manifest and secret Claude writes, makes it fix the issues itself, and asks before destructive cloud commands.",
+  "author": { "name": "Pascal Nehlsen" },
+  "license": "MIT",
+  "keywords": ["security", "devsecops", "github-actions", "docker", "terraform", "kubernetes", "secrets", "gcp", "aws", "azure"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "blockAt": {
+      "type": "string",
+      "title": "Block at severity",
+      "description": "Findings at or above this severity stop the write so Claude fixes them first; lower ones are passed to Claude as a note after the write.",
+      "default": "high",
+      "options": ["critical", "high", "medium", "low", "never"]
+    },
+    "cloudGuard": {
+      "type": "string",
+      "title": "Destructive cloud commands",
+      "description": "ask: put terraform destroy, gcloud/aws/az deletes, kubectl delete ns and the like to you first. deny: Claude never runs them. off: no check.",
+      "default": "ask",
+      "options": ["ask", "deny", "off"]
+    }
+  }
+}

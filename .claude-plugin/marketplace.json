@@ -1,0 +1,13 @@
+{
+  "name": "shift-left-guard",
+  "description": "DevSecOps guardrails for Claude Code: secure workflows, Dockerfiles, Terraform and Kubernetes by default.",
+  "owner": {
+    "name": "Pascal Nehlsen"
+  },
+  "plugins": [
+    {
+      "name": "shift-left-guard",
+      "source": "./"
+    }
+  ]
+}

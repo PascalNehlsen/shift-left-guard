@@ -1,0 +1,10 @@
+{
+  "name": "shift-left-guard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build cli/guard-scan.ts --target=node --format=esm --minify-syntax --outfile=bin/guard-scan.mjs",
+    "test": "claude plugin test .",
+    "validate": "claude plugin validate ."
+  }
+}
