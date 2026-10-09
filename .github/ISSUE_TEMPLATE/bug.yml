@@ -1,0 +1,29 @@
+name: Bug
+description: Something in the mod, the /guard command or the pre-commit hook does not work.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `claude --version` and the Shift-Left Guard version from /plugin.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug output
+      description: Lines mentioning shift-left-guard from `claude --debug`, if any.
+      render: text
