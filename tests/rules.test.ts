@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { EXPLAIN, RULES, applyEdit, badgeFileUrl, badgeJson, badgeMarkdown, envHasSecrets, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, isReadOnlyCommand, parseConfig, scan, scoreOf, weekOf } from '../hooks/rules'
+import { EXPLAIN, RULES, applyEdit, badgeFileUrl, badgeJson, badgeMarkdown, envHasSecrets, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, isReadOnlyCommand, writesAndPublishes, parseConfig, scan, scoreOf, weekOf } from '../hooks/rules'
 
 const ids = (path: string, text: string) => scan(path, text).map(f => f.id)
 
@@ -578,5 +578,26 @@ describe('read-only shell commands', () => {
       expect(isReadOnlyCommand(c)).toBe(true)
     for (const c of ['cp a b', 'cat > a.yml <<EOF', 'echo x > f', 'sed -i s/a/b/ f', 'find . -delete', 'git checkout main', 'ls | xargs rm', 'cat a | tee b', 'echo $(touch f)', 'npm install', 'git branch -D x', 'git tag -d v1'])
       expect(isReadOnlyCommand(c)).toBe(false)
+  })
+})
+
+describe('writing and committing in one command', () => {
+  test('is caught, while plain commits and heredoc messages pass', async () => {
+    for (const c of [
+      'cp templates/greet.yml .github/workflows/ && git add -A && git commit -m "add"',
+      'git checkout -b x && cp a b && git add b && git commit -qm x',
+      'npm run build; git commit -am build',
+      './scripts/gen.sh && git push',
+    ])
+      expect(writesAndPublishes(c)).toBe(true)
+    for (const c of [
+      'git add -A && git commit -m "copy templates; cp is fine && rm too"',
+      "git commit -m \"$(cat <<'EOF'\nAdd greeter\n\ncp the template\nEOF\n)\"",
+      'cd repo && git status && git commit -m x',
+      'git push -u origin main',
+      'cp a b',
+      'gh pr create --fill',
+    ])
+      expect(writesAndPublishes(c)).toBe(false)
   })
 })

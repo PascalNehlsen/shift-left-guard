@@ -1,0 +1,12 @@
+name: greet
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Thanks for ${{ github.event.issue.title }}"

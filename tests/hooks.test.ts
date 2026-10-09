@@ -220,6 +220,10 @@ const fakeRepo = (on: On, files: Record<string, string>, head: Record<string, st
       const rels = Object.keys(files).filter(f => f.startsWith('/repo/') && !f.startsWith('/repo/.git/')).map(f => f.slice(6))
       return ok(rels.join('\0'))
     }
+    if (a === 'status') {
+      const rels = Object.keys(files).filter(f => f.startsWith('/repo/') && !f.startsWith('/repo/.git/')).map(f => f.slice(6))
+      return ok(rels.map(r => `${head[r] === undefined ? 'A ' : ' M'} ${r}`).join('\0'))
+    }
     if (a === 'show') {
       const rel = (b ?? '').replace(/^HEAD:/, '')
       return head[rel] === undefined ? fail : ok(head[rel]!)
@@ -273,6 +277,57 @@ describe('shell writes', () => {
     expect(r.deny).toBeUndefined()
     expect((r.result as { stdout?: string } | undefined)?.stdout).toBe('done')
     expect(runs).toBe(1)
+  })
+})
+
+describe('commit gate', () => {
+  test('a finding a shell command wrote blocks Claude committing until the file is fixed', async ($, on) => {
+    const files: Record<string, string> = {}
+    fakeRepo(on, files)
+    on('tool.check', () => ({ decision: 'allow' }))
+    on('tool.call', { tool: 'Bash' }, () => {
+      files['/repo/.github/workflows/ci.yml'] = UNSAFE
+      return { result: { stdout: '', stderr: '', interrupted: false } as never }
+    })
+    const r = await $.tool.call(bash('cp templates/ci.yml .github/workflows/'))
+    expect(r.context?.join('\n')).toContain('does not cover writing a vulnerability')
+
+    const commit = await $.tool.check({ tool: 'Bash', input: { command: 'git add -A && git commit -m "add ci"' } })
+    expect(commit.decision).toBe('deny')
+    expect(commit.reason).toContain('.github/workflows/ci.yml: GHA003')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git status' } })).decision).toBe('allow')
+
+    files['/repo/.github/workflows/ci.yml'] = SAFE
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m "add ci"' } })).decision).toBe('allow')
+  })
+
+  test('copying and committing in one command is split, so the guard sees the file in between', async ($, on) => {
+    fakeRepo(on, {})
+    on('tool.check', () => ({ decision: 'allow' }))
+    const r = await $.tool.check({ tool: 'Bash', input: { command: 'cp templates/ci.yml .github/workflows/ && git add -A && git commit -m ci' } })
+    expect(r.decision).toBe('deny')
+    expect(r.reason).toContain('separate command')
+  })
+
+  test('a blocked Write never reached the disk, so it does not block committing', async ($, on) => {
+    fakeRepo(on, {})
+    on('tool.check', () => ({ decision: 'allow' }))
+    const r = await $.tool.call({ tool: 'Write', file_path: WORKFLOW, content: UNSAFE })
+    expect(r.deny ?? '').toContain('GHA003')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git push' } })).decision).toBe('allow')
+  })
+
+  test('/guard pause lifts the gate', async ($, on) => {
+    const files: Record<string, string> = {}
+    fakeRepo(on, files)
+    on('tool.check', () => ({ decision: 'allow' }))
+    on('tool.call', { tool: 'Bash' }, () => {
+      files['/repo/.github/workflows/ci.yml'] = UNSAFE
+      return { result: { stdout: '', stderr: '', interrupted: false } as never }
+    })
+    await $.tool.call(bash('cp a b'))
+    await $.command.run({ command: 'guard', args: 'pause' } as never)
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'gh pr create --fill' } })).decision).toBe('allow')
   })
 })
 

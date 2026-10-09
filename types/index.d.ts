@@ -37,8 +37,8 @@ declare module 'claude-code' {
     'shift-left-guard': {
       events: GuardEvent[]
       totals: Totals
-      /** Rule ids still blocked per file, cleared when a clean write follows. */
-      pending: Record<string, { ids: string[]; attempts: number; key: string; line?: number; window?: string[] }>
+      /** Rule ids still open per file, cleared when a clean write follows; isOnDisk when the issues landed (shell write, let-through). */
+      pending: Record<string, { ids: string[]; attempts: number; key: string; line?: number; window?: string[]; isOnDisk?: boolean }>
       isPaused: boolean
       isBandHidden: boolean
       /** What the guard did to each tool call, by tool_use_id, for the 🛡 mark on its transcript row. */

@@ -19,7 +19,7 @@
 - **Your agent's own config is guarded too.** Wildcard permissions in `.claude/settings.json`, unpinned MCP servers, tokens in `.mcp.json`, prompt injection hidden in `CLAUDE.md`.
 - **Nothing deletes production by accident.** `terraform destroy`, `gcloud … delete` and their friends stop and show you what they would hit.
 
-**Why, if Claude already writes secure code?** Risky code mostly comes from outside: templates, copy-paste, generators. We asked Claude to copy the platform team's workflow template three times without the guard. Every time it spotted the injection, and every time it left the vulnerable file on disk while asking whether to fix it. One "commit this" later, it ships. The guard turns "Claude noticed" into "the file is fixed", every time, for every model and teammate.
+**Why, if Claude already writes secure code?** Mostly it does. We asked Claude to copy a workflow template with a script injection into `.github/workflows/`, without the guard. Opus noticed the injection in 10 of 10 runs, fixed it in 8, and in 2 left the vulnerable file on disk while asking whether to fix it. Haiku copied it unchanged in 5 of 5, and when asked to commit, committed it in 5 of 5. With the guard, Haiku committed it in 0 of 5 ([evaluation](docs/evaluation.md)). Noticing is not a control: the guard turns "Claude usually catches it" into "it does not land", for every model and teammate.
 
 Runs locally inside Claude Code: no API keys, no network, nothing to configure.
 
@@ -51,7 +51,7 @@ Then `/guard fix` puts a fix request for all findings into your prompt: press En
 
 **While Claude writes.** A risky write is stopped before it reaches the file. Claude reads what is wrong and how to fix it, and writes it again. The band above the prompt shows what was caught and, once fixed, the lines that changed. Every file Claude writes carries a `🛡 clean` or `🛡 fixed GHA003` mark in the transcript.
 
-**When Claude runs shell commands.** Files written by `cp`, `sed -i`, heredocs or generators are checked right after the command, and Claude must fix them in the same step.
+**When Claude runs shell commands.** A shell command's output is only known once it has run, so files written by `cp`, `sed -i`, heredocs or generators are checked right after it, and Claude is told to fix them. Claude can ignore advice, so the guard also enforces it: until the files are fixed, it refuses Claude's `git commit`, `git push` and `gh pr create`, and a single command that both writes files and commits them is sent back to be split.
 
 **Before destructive cloud commands.** You decide, with the blast radius in front of you. In production, **Cancel** is the default:
 
@@ -118,11 +118,18 @@ In the terminal and in the Claude Code desktop app. In the VS Code extension's c
 No. A sandbox limits what Claude can *reach*; the guard limits what Claude *produces*. Keep `zizmor`, `hadolint`, `checkov` and `gitleaks` in CI: the guard is the fast first line, while the code is still being written.
 </details>
 
+<details>
+<summary><b>How is this different from Anthropic's <code>security-guidance</code> plugin?</b></summary>
+
+They do different jobs, and work well together. [`security-guidance`](https://code.claude.com/docs/en/security-guidance) has Claude review its own application code with a model (injection, authorization, unsafe deserialization) and, by design, never blocks a write or a commit. Shift-Left Guard is deterministic and does block: it stops infrastructure and agent-config issues (workflows, Dockerfiles, Terraform, Kubernetes, Compose, `.mcp.json`, `CLAUDE.md`) before they are written, keeps flagged files out of Claude's commits, puts destructive cloud commands to you, and checks your own commits and CI with the same rules, without model calls.
+</details>
+
 ## Learn more
 
 - [Rules](docs/rules.md): all 42 rules, which files they apply to, and how to silence one
 - [Configuration](docs/configuration.md): settings, team rules in `.guard.json`, pausing, updates
 - [CI](docs/ci.md): pre-commit hook, pipeline, SARIF, score and live badge
+- [Evaluation](docs/evaluation.md): what the guard changed in measured runs with Opus and Haiku, and what those runs do not show
 
 > [!TIP]
 > Community plugins do not update on their own. Turn on auto-update once: `/plugin` → **Marketplaces** → shift-left-guard → **Enable auto-update**.
