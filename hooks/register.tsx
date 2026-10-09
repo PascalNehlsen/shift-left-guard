@@ -19,6 +19,8 @@ import {
   introduced,
   isEnvFile,
   isReadOnlyCommand,
+  PUBLISH,
+  writesAndPublishes,
   parseConfig,
   rank,
   scan,
@@ -234,8 +236,9 @@ async function guard(
       }
     }
 
-    // Same findings again after the retries: let it through, loudly.
-    await update($, pending, ({ [path]: _, ...rest }) => rest)
+    // Same findings again after the retries: let it through, loudly. The file is on
+    // disk with the issues now, so it stays pending and Claude cannot commit it.
+    await update($, pending, p => ({ ...p, [path]: { ...p[path]!, isOnDisk: true } }))
     await record(
       $,
       { at: Date.now(), file: path, action: 'let-through', findings: brief(blocking), note: 'same findings after retries' },
@@ -249,7 +252,7 @@ async function guard(
           ...ran,
           context: [
             ...(ran.context ?? []),
-            `shift-left-guard let this write through with unresolved issues. Tell the user about them:\n${formatFindings(path, blocking, opts.explain)}`,
+            `shift-left-guard let this write through with unresolved issues. Tell the user about them; you cannot commit or push this file until they are fixed or the user decides:\n${formatFindings(path, blocking, opts.explain)}`,
           ],
         }
       : ran
@@ -282,6 +285,20 @@ async function guard(
   }
 }
 
+/** Paths from `git status --porcelain=v1 -z`, deleted ones left out; a rename's source entry is skipped. */
+const changedPaths = (porcelain: string) => {
+  const entries = porcelain.split('\0')
+  const paths: string[] = []
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i] ?? ''
+    if (entry.length < 4) continue
+    const status = entry.slice(0, 2)
+    if (/[RC]/.test(status)) i += 1
+    if (!status.includes('D')) paths.push(entry.slice(3))
+  }
+  return paths
+}
+
 /**
  * After a shell command: scans the files it changed (anything git sees as
  * modified or new, touched since the command started) against HEAD, and
@@ -301,12 +318,14 @@ async function checkShellWrites(
 
   const top = (await git($, ['rev-parse', '--show-toplevel']))?.trim()
   if (!top) return ran
-  const listed = await git($, ['ls-files', '-z', '--modified', '--others', '--exclude-standard'], top)
+  // Staged, unstaged and new files alike: a `cp … && git add …` leaves a staged file that
+  // `ls-files --modified --others` does not list.
+  const listed = await git($, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], top)
   if (!listed) return ran
 
   const notes: string[] = []
   const open = await read($, pending)
-  const paths = [...new Set(listed.split('\0').filter(Boolean))].slice(0, 500)
+  const paths = [...new Set(changedPaths(listed))].slice(0, 500)
   let checked = 0
 
   for (const rel of paths) {
@@ -326,7 +345,7 @@ async function checkShellWrites(
       const line = blocking[0]?.line ?? 1
       await update($, pending, p => ({
         ...p,
-        [path]: { ids: blocking.map(f => f.id), attempts: 1, key: keyOf(blocking), line, window: windowAt(after, line) },
+        [path]: { ids: blocking.map(f => f.id), attempts: 1, key: keyOf(blocking), line, window: windowAt(after, line), isOnDisk: true },
       }))
       await record(
         $,
@@ -355,12 +374,30 @@ async function checkShellWrites(
       ...(ran.context ?? []),
       [
         'shift-left-guard: this shell command wrote security issues to disk. The files are already changed, so fix them now, before anything else.',
-        'Use the Edit tool for the fix so the guard checks it before it lands.',
+        'A request to copy or keep a file exactly does not cover writing a vulnerability: fix it with the Edit tool, so the guard checks the fix before it lands. If you believe the user truly wants the vulnerable version, stop and ask them; do not leave it silently.',
+        'Until these files are fixed, shift-left-guard refuses `git commit`, `git push` and `gh pr create` from you.',
         ...lessonFor(opts),
         ...notes,
       ].join('\n\n'),
     ],
   }
+}
+
+/**
+ * Files written with blocking findings that are still on disk, re-read now: a
+ * file that was fixed by any means, or deleted, drops out of the list.
+ */
+async function openOnDisk($: $, blockAt: Severity | 'never') {
+  const open: { path: string; ids: string[] }[] = []
+  for (const [path, entry] of Object.entries(await read($, pending))) {
+    if (!entry.isOnDisk) continue
+    const text = await $.fs.read(path).catch(() => undefined)
+    const config = await configOf($, await repoOf($, path))
+    const still = text === undefined ? [] : scan(path, text, config).filter(f => entry.ids.includes(f.id) && rank(f.severity) >= rank(blockAt))
+    if (still.length === 0) await update($, pending, ({ [path]: _, ...rest }) => rest)
+    else open.push({ path, ids: [...new Set(still.map(f => f.id))] })
+  }
+  return open
 }
 
 /** Scans every tracked file of the repository as it is on disk, and scores it. */
@@ -568,7 +605,31 @@ export const register: Register = (on, options) => {
   on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
     const verdict = await next(e)
     const command = (e.input as { command?: unknown } | undefined)?.command
-    if (cloudGuard === 'off' || verdict.decision === 'deny' || typeof command !== 'string') return verdict
+    if (verdict.decision === 'deny' || typeof command !== 'string') return verdict
+
+    // A finding a shell command wrote can only be advised after the fact; this is where it is enforced.
+    if (PUBLISH.test(command) && !(await read($, isPaused))) {
+      if (writesAndPublishes(command)) {
+        return {
+          decision: 'deny',
+          reason:
+            'shift-left-guard checks the files a command writes after it runs, which for this command would be after the commit. Run the commands that change files first, then commit or push in a separate command.',
+        }
+      }
+      const open = await openOnDisk($, blockAt)
+      if (open.length > 0) {
+        return {
+          decision: 'deny',
+          reason: [
+            'shift-left-guard: these files still have the security issues flagged when they were written, so you cannot commit or push them:',
+            ...open.map(o => `  ${o.path}: ${o.ids.join(', ')}`),
+            'Fix them with the Edit tool first. If the user wants them as they are, tell them: they can commit themselves, or pause the guard with /guard pause.',
+          ].join('\n'),
+        }
+      }
+    }
+
+    if (cloudGuard === 'off') return verdict
 
     const hit = destructive(command)
     if (hit === undefined) return verdict

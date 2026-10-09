@@ -7,7 +7,7 @@
 | Who writes | How | Checked |
 |---|---|---|
 | Claude | `Write` / `Edit` tool | ✅ before the write, can block |
-| Claude | Bash (`sed -i`, `cat >`, scripts …) | ✅ right after the command, Claude must fix |
+| Claude | Bash (`sed -i`, `cat >`, scripts …) | ✅ right after the command; Claude cannot commit or push it until fixed |
 | You | your editor | ✅ at `git commit`, with `/guard install-hook` |
 | Anyone | CI | ✅ with `guard-scan.mjs --all` ([CI](ci.md)) |
 
@@ -26,7 +26,7 @@ Only the changed file is scanned, and only what the change introduces is reporte
 | every file | SEC |
 
 > [!IMPORTANT]
-> **Write/Edit are checked before the file is written. Shell commands can only be checked after.** A shell command's output is not known until it has run, so the shell guard cannot refuse the write. It flags it immediately and makes Claude fix it in the same step. The pre-commit hook is the backstop for anything that still slips through.
+> **Write/Edit are checked before the file is written. Shell commands can only be checked after.** A shell command's output is not known until it has run, so the shell guard cannot refuse the write. It flags it immediately and tells Claude to fix it. Because a model can ignore that (Haiku did in 3 of 5 runs), the guard enforces it at the next step: while a flagged file is still on disk with its findings, Claude's `git commit`, `git push` and `gh pr create` are refused, and a single command that writes files and commits them is sent back to be split. Commands that only read (`ls`, `cat`, `grep`, `git status`) are not checked. The pre-commit hook covers your own commits.
 
 ## All rules
 
