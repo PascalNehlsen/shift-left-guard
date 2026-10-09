@@ -1,5 +1,6 @@
 // cli/guard-scan.ts
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 // hooks/rules.ts
 var SEVERITIES = ["low", "medium", "high", "critical"], rank = (severity) => severity === "never" ? 1 / 0 : SEVERITIES.indexOf(severity), FULL_SHA = /^[0-9a-f]{40}$/, INJECTABLE = /\$\{\{\s*(github\.head_ref|github\.event\.(issue|pull_request|comment|review|review_comment|discussion|discussion_comment|head_commit|commits|pages)\b[^}]*\.(title|body|head_ref|ref|label|name|email|message|page_name|default_branch))\s*\}\}/, SECRET_NAME = /(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)/i, isComment = (line) => /^\s*#/.test(line), isPublicInvoker = (line, ctx) => /"allUsers"/.test(line) && ctx.lines.slice(Math.max(0, ctx.index - 4), ctx.index + 5).some((l) => /roles\/(run|cloudfunctions)\.invoker/.test(l)), RULES = [
@@ -299,18 +300,24 @@ var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDF
 `);
 
 // cli/guard-scan.ts
-var args = process.argv.slice(2), isAll = args.includes("--all"), blockAt = args.find((a) => a.startsWith("--block-at="))?.split("=")[1] ?? "high", git = (...argv) => {
+var args = process.argv.slice(2), paths = args.filter((a) => !a.startsWith("--")), isAll = args.includes("--all") || paths.length > 0, blockAt = args.find((a) => a.startsWith("--block-at="))?.split("=")[1] ?? "high", git = (...argv) => {
   try {
     return execFileSync("git", argv, { encoding: "utf8", maxBuffer: 67108864, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
     return;
   }
-}, isText = (text) => text.length < 1e6 && !text.includes("\x00"), files = (isAll ? git("ls-files", "-z") : git("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"))?.split("\x00").filter(Boolean);
+}, readFile = (path) => {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+}, isText = (text) => text.length < 1e6 && !text.includes("\x00"), files = (paths.length > 0 ? paths.join("\x00") : isAll ? git("ls-files", "-z") : git("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"))?.split("\x00").filter(Boolean);
 if (files === void 0)
   console.error("shift-left-guard: not a git repository"), process.exit(2);
 var color = process.stdout.isTTY ? (code, text) => `\x1B[${code}m${text}\x1B[0m` : (_, text) => text, blocking = 0, other = 0;
 for (let path of files) {
-  let after = isAll ? git("show", `HEAD:${path}`) : git("show", `:${path}`);
+  let after = isAll ? readFile(path) : git("show", `:${path}`);
   if (after === void 0 || !isText(after))
     continue;
   let found = isAll ? scan(path, after) : introduced(scan(path, git("show", `HEAD:${path}`) ?? ""), scan(path, after));

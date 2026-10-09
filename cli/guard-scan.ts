@@ -1,15 +1,18 @@
 // Standalone scanner: the same rules as the mod, for a pre-commit hook or CI.
 //   node guard-scan.mjs                  scan staged changes (pre-commit)
-//   node guard-scan.mjs --all            audit every tracked file (CI)
+//   node guard-scan.mjs --all            audit every tracked file as it is on disk (CI)
+//   node guard-scan.mjs path/to/file ...  audit the given files as they are on disk
 //   node guard-scan.mjs --block-at=medium
 // Exits 1 when a finding at or above --block-at (default high) is found.
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 
 import type { Finding, Severity } from '../types'
 import { formatFindings, introduced, rank, scan } from '../hooks/rules'
 
 const args = process.argv.slice(2)
-const isAll = args.includes('--all')
+const paths = args.filter(a => !a.startsWith('--'))
+const isAll = args.includes('--all') || paths.length > 0
 const blockAt = (args.find(a => a.startsWith('--block-at='))?.split('=')[1] ?? 'high') as Severity | 'never'
 
 const git = (...argv: string[]) => {
@@ -20,9 +23,17 @@ const git = (...argv: string[]) => {
   }
 }
 
+const readFile = (path: string) => {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
 const isText = (text: string) => text.length < 1_000_000 && !text.includes('\0')
 
-const files = (isAll ? git('ls-files', '-z') : git('diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'))
+const files = (paths.length > 0 ? paths.join('\0') : isAll ? git('ls-files', '-z') : git('diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'))
   ?.split('\0')
   .filter(Boolean)
 
@@ -36,7 +47,7 @@ const color = process.stdout.isTTY ? (code: number, text: string) => `\x1b[${cod
 let blocking = 0
 let other = 0
 for (const path of files) {
-  const after = isAll ? git('show', `HEAD:${path}`) : git('show', `:${path}`)
+  const after = isAll ? readFile(path) : git('show', `:${path}`)
   if (after === undefined || !isText(after)) continue
   const found: Finding[] = isAll ? scan(path, after) : introduced(scan(path, git('show', `HEAD:${path}`) ?? ''), scan(path, after))
   if (found.length === 0) continue
