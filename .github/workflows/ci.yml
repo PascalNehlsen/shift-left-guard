@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_VERSION: 1.3.14
+
+jobs:
+  plugin:
+    name: Validate & test plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # The Claude Code CLI is pinned in package-lock.json (the plugin API is
+      # early access); Dependabot proposes bumps as PRs this job then tests.
+      - name: Install the pinned Claude Code CLI
+        run: npm ci
+
+      - name: Validate manifest, marketplace and hooks module
+        run: npm run validate
+
+      - name: Run plugin tests
+        run: npm test
+
+  scanner:
+    name: Scanner bundle & self-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Rebuild the pre-commit scanner
+        run: bun run build
+
+      - name: Check the committed bundle is up to date
+        run: |
+          if ! git diff --exit-code -- bin/guard-scan.mjs; then
+            echo "::error file=bin/guard-scan.mjs::Out of date with hooks/rules.ts. Run 'bun run build' and commit the result."
+            exit 1
+          fi
+
+      - name: Scan this repository with its own rules
+        run: npm run self-scan
