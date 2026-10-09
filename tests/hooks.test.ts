@@ -299,6 +299,45 @@ describe('repository config', () => {
   })
 })
 
+describe('audit', () => {
+  test('scores the repository, opens the pane and hands the fix to the prompt', async ($, on) => {
+    const files: Record<string, string> = {
+      '/repo/.github/workflows/ci.yml': UNSAFE,
+      '/repo/Dockerfile': 'FROM node:latest\nUSER app\n',
+      '/repo/README.md': '# hi\n',
+    }
+    fakeRepo(on, files)
+    on('ui.open', () => ({ value: { isPlaced: true } as never }))
+    const filled: string[] = []
+    on('prompt.fill', ($, e) => {
+      filled.push(e.text)
+      return { isFilled: true } as never
+    })
+    const r = await $.command.run({ command: 'guard', args: 'audit' } as never)
+    expect(r.text).toContain('Security score: 87/100 · grade B')
+    expect(r.text).toContain('GHA003')
+    const fix = await $.command.run({ command: 'guard', args: 'fix' } as never)
+    expect(fix.text).toContain('Press Enter')
+    expect(filled[0]).toContain('.github/workflows/ci.yml:5 GHA003 (high)')
+    const badge = await $.command.run({ command: 'guard', args: 'badge' } as never)
+    expect(badge.text).toContain('shift--left--guard-B-green')
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const pane = await $.ui.mount({
+        plugin: 'shift-left-guard',
+        surface,
+        component: 'Pane',
+        requestId: 'shift-left-guard-report',
+        props: {} as never,
+      } as never)
+      expect(await pane.find({ type: 'Text', text: /Grade B · 87\/100/ })).toBeDefined()
+      await pane.press({ key: 'fix' })
+      await pane.unmount()
+    }
+    expect(filled.length).toBe(3)
+  })
+})
+
 describe('install-hook', () => {
   test('writes the scanner and a pre-commit hook', async ($, on) => {
     const files: Record<string, string> = {}

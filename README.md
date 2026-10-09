@@ -4,6 +4,7 @@
   <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/zizmor.yml"><img src="https://github.com/PascalNehlsen/shift-left-guard/actions/workflows/zizmor.yml/badge.svg" alt="zizmor"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/PascalNehlsen/shift-left-guard"><img src="https://img.shields.io/badge/shift--left--guard-A-brightgreen" alt="shift-left-guard: A"></a>
 </p>
 
 **DevSecOps guardrails for Claude Code.** Every GitHub Actions workflow, Dockerfile, Terraform file, Kubernetes manifest, Compose file, `package.json`, agent config (`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`) and secret that Claude writes is checked *before* it hits your disk. When something is wrong, Claude gets the findings and fixes them itself. Destructive cloud commands come to you before they run.
@@ -80,7 +81,7 @@ claude plugin marketplace update shift-left-guard
 claude plugin update shift-left-guard@shift-left-guard
 ```
 
-Then run `/reload-plugins` in an open session, or start a new one. To stay on a fixed release, add the marketplace pinned to a tag instead: `PascalNehlsen/shift-left-guard#v0.2.1`.
+Then run `/reload-plugins` in an open session, or start a new one. To stay on a fixed release, add the marketplace pinned to a tag instead: `PascalNehlsen/shift-left-guard#v0.3.0`.
 
 ## What it does
 
@@ -91,6 +92,8 @@ Then run `/reload-plugins` in an open session, or start a new one. To stay on a 
 | **Shell guard** | After every Bash command, files git sees as changed since the command started are scanned against `HEAD`. This catches `sed -i`, `cat > file`, heredocs and generators. Claude gets the findings in the same step and must fix them first. |
 | **Warnings** | Lower-severity findings pass, and Claude gets them as a note after the write. |
 | **Cloud guard** | Bash commands like `terraform destroy`, `apply -auto-approve`, `gcloud … delete`, `aws … delete-*`, `aws s3 rm --recursive`, `az … delete`, `kubectl delete ns`, `helm uninstall` and owner/admin IAM grants are put to you (`ask`) or refused (`deny`). With `ask` you get a **blast-radius dialog**: the command, the project, region, namespace or bucket it hits, whether it targets production, and what undoing it takes. |
+| **Audit & score** | `/guard audit` scans the whole repository and gives it a **security score and grade (A–F)** with the top findings. `/guard fix` puts a fix request for all of them into your prompt (or press **Fix with Claude** in the pane); `/guard badge` prints a README badge for the grade. |
+| **Weekly recap** | Once a week, at your first session, a toast says what the guard did last week: issues stopped, fixed by Claude, cloud commands checked. |
 | **Pre-commit hook** | `/guard install-hook` installs a git hook with the same rules into the current repo. It covers your own edits too, with no Claude involved. |
 | **Band, pane, status line** | A line above the prompt shows the last interception, with **[Report]** (opens the findings pane: every finding with its fix) and **[Hide]**. When Claude fixes a finding, the band shows the **before/after diff** of the lines it changed. The status line keeps a running score. |
 | **🛡 on the transcript row** | Every `Write`/`Edit` Claude makes carries a mark on its row: `🛡 clean`, `🛡 blocked GHA003`, `🛡 fixed GHA003`. Shell commands that wrote an issue and cloud commands are marked too. |
@@ -104,6 +107,9 @@ Then run `/reload-plugins` in an open session, or start a new one. To stay on a 
 | Command | |
 |---|---|
 | `/guard` | Session + all-time report |
+| `/guard audit` | Scan the whole repository: score, grade and top findings |
+| `/guard fix` | Put a fix request for the audit's findings into your prompt; press Enter to send |
+| `/guard badge` | README badge for the last audit's grade |
 | `/guard pane` | Open the findings pane (same as the **[Report]** button) |
 | `/guard rules` | List all rules with severity |
 | `/guard install-hook` | Install the pre-commit hook in the current repo |
@@ -243,13 +249,15 @@ Put a `.guard.json` in the repository root to add your own rules or switch built
 The pre-commit scanner is a self-contained Node script, [`bin/guard-scan.mjs`](bin/guard-scan.mjs), with no dependencies. Download it from a release tag and run it in any pipeline that has Node:
 
 ```yaml
-- run: curl -fsSLO https://raw.githubusercontent.com/PascalNehlsen/shift-left-guard/v0.1.0/bin/guard-scan.mjs
+- run: curl -fsSLO https://raw.githubusercontent.com/PascalNehlsen/shift-left-guard/v0.3.0/bin/guard-scan.mjs
 - run: node guard-scan.mjs --all --block-at=high
 ```
 
 Pin the tag (or a commit SHA) rather than `main`, so a new release never changes your pipeline unreviewed.
 
-`--all` audits every tracked file. Without it, the script scans staged changes only (pre-commit mode).
+`--all` audits every tracked file and prints the security score; add `--badge` for the README badge. Without `--all`, the script scans staged changes only (pre-commit mode).
+
+The score is 100 minus 25 per critical, 10 per high, 3 per medium and 1 per low finding: A ≥ 90, B ≥ 75, C ≥ 60, D ≥ 40, else F.
 
 **GitHub code scanning:** `--format=sarif` prints [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), so findings show up in the Security tab and as PR annotations:
 

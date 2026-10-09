@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { EXPLAIN, RULES, applyEdit, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, parseConfig, scan } from '../hooks/rules'
+import { EXPLAIN, RULES, applyEdit, badgeMarkdown, blastRadius, classify, destructive, formatFindings, introduced, isEnvFile, parseConfig, scan, scoreOf, weekOf } from '../hooks/rules'
 
 const ids = (path: string, text: string) => scan(path, text).map(f => f.id)
 
@@ -476,5 +476,23 @@ describe('learning mode', () => {
     const found = scan('/r/Dockerfile', 'FROM node:latest\nUSER app')
     expect(formatFindings('/r/Dockerfile', found)).not.toContain('why:')
     expect(formatFindings('/r/Dockerfile', found, true)).toContain('cwe.mitre.org/data/definitions/1104.html')
+  })
+})
+
+describe('score', () => {
+  test('grades a repository by its findings', async () => {
+    expect(scoreOf([])).toEqual({ score: 100, grade: 'A' })
+    expect(scoreOf([{ severity: 'high' }])).toEqual({ score: 90, grade: 'A' })
+    expect(scoreOf([{ severity: 'critical' }])).toEqual({ score: 75, grade: 'B' })
+    expect(scoreOf([{ severity: 'critical' }, { severity: 'high' }, { severity: 'medium' }])).toEqual({ score: 62, grade: 'C' })
+    expect(scoreOf(Array(5).fill({ severity: 'critical' }))).toEqual({ score: 0, grade: 'F' })
+    expect(badgeMarkdown('B')).toContain('img.shields.io/badge/shift--left--guard-B-green')
+  })
+
+  test('counts weeks the ISO way', async () => {
+    expect(weekOf(Date.UTC(2026, 9, 9, 12))).toBe('2026-W41')
+    expect(weekOf(Date.UTC(2026, 0, 1))).toBe('2026-W01')
+    expect(weekOf(Date.UTC(2027, 0, 1))).toBe('2026-W53')
+    expect(weekOf(Date.UTC(2024, 11, 30))).toBe('2025-W01')
   })
 })

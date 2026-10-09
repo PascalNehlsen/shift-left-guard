@@ -21,6 +21,17 @@ export type GuardEvent = {
 
 export type Totals = { blocked: number; warned: number; fixed: number; cloud: number }
 
+export type Audit = {
+  at: number
+  top: string
+  score: number
+  grade: 'A' | 'B' | 'C' | 'D' | 'F'
+  scanned: number
+  isTruncated: boolean
+  counts: Record<Severity, number>
+  findings: { path: string; id: string; severity: Severity; title: string; line: number }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'shift-left-guard': {
@@ -32,6 +43,8 @@ declare module 'claude-code' {
       isBandHidden: boolean
       /** What the guard did to each tool call, by tool_use_id, for the 🛡 mark on its transcript row. */
       verdicts: Record<string, { action: GuardEvent['action'] | 'clean'; ids: string[] }>
+      /** The last /guard audit of this session. */
+      audit: Audit | null
     }
   }
 }

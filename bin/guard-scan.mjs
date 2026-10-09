@@ -665,6 +665,10 @@ var ICON = { critical: "\uD83D\uDFE5", high: "\uD83D\uDFE7", medium: "\uD83D\uDF
    fix: ${f.fix}${lesson}`;
 }).join(`
 `);
+var PENALTY = { critical: 25, high: 10, medium: 3, low: 1 }, scoreOf = (findings) => {
+  let score = Math.max(0, 100 - findings.reduce((sum, f) => sum + PENALTY[f.severity], 0)), grade = score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "F";
+  return { score, grade };
+}, GRADE_COLOR = { A: "brightgreen", B: "green", C: "yellow", D: "orange", F: "red" }, badgeMarkdown = (grade) => `[![shift-left-guard: ${grade}](https://img.shields.io/badge/shift--left--guard-${grade}-${GRADE_COLOR[grade]})](https://github.com/PascalNehlsen/shift-left-guard)`;
 
 // cli/guard-scan.ts
 var args = process.argv.slice(2), paths = args.filter((a) => !a.startsWith("--")), isAll = args.includes("--all") || paths.length > 0, blockAt = args.find((a) => a.startsWith("--block-at="))?.split("=")[1] ?? "high", format = args.find((a) => a.startsWith("--format="))?.split("=")[1] ?? "text";
@@ -735,6 +739,11 @@ if (format === "sarif") {
       }
     ]
   }, null, 2)), process.exit(blocking > 0 ? 1 : 0);
+}
+if (isAll) {
+  let { score, grade } = scoreOf(results.map((r) => r.finding));
+  if (console.log(color(grade <= "B" ? 32 : grade === "C" ? 33 : 31, `\uD83D\uDEE1 Security score: ${score}/100 · grade ${grade}`)), args.includes("--badge"))
+    console.log(badgeMarkdown(grade));
 }
 if (blocking > 0)
   console.log(color(31, `\uD83D\uDEE1 shift-left-guard: ${blocking} issue(s) at or above ${blockAt}. Commit stopped.`)), console.log(color(2, "   Fix them, silence a line with `# guard:ignore <ID>`, or skip once with `git commit --no-verify`.")), process.exit(1);

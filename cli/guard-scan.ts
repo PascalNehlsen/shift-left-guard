@@ -4,13 +4,14 @@
 //   node guard-scan.mjs path/to/file ...  audit the given files as they are on disk
 //   node guard-scan.mjs --block-at=medium
 //   node guard-scan.mjs --all --format=sarif > guard.sarif   for GitHub code scanning
+//   node guard-scan.mjs --all --badge     also print the README badge for the score
 // Exits 1 when a finding at or above --block-at (default high) is found.
 // Reads the repository's .guard.json (team rules, disabled rules) like the mod does.
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 
 import type { Finding, Severity } from '../types'
-import { CONFIG_FILE, RULES, envFinding, formatFindings, introduced, isEnvFile, parseConfig, rank, scan } from '../hooks/rules'
+import { CONFIG_FILE, RULES, badgeMarkdown, envFinding, formatFindings, introduced, isEnvFile, parseConfig, rank, scan, scoreOf } from '../hooks/rules'
 
 const args = process.argv.slice(2)
 const paths = args.filter(a => !a.startsWith('--'))
@@ -117,6 +118,12 @@ if (format === 'sarif') {
     ),
   )
   process.exit(blocking > 0 ? 1 : 0)
+}
+
+if (isAll) {
+  const { score, grade } = scoreOf(results.map(r => r.finding))
+  console.log(color(grade <= 'B' ? 32 : grade === 'C' ? 33 : 31, `🛡 Security score: ${score}/100 · grade ${grade}`))
+  if (args.includes('--badge')) console.log(badgeMarkdown(grade))
 }
 
 if (blocking > 0) {

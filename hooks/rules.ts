@@ -917,3 +917,32 @@ export const blastRadius = (command: string): { label: string; value: string }[]
     const value = m?.slice(1).filter(Boolean).at(-1)?.replace(/^['"]|['"]$/g, '')
     return value === undefined ? [] : [{ label, value }]
   })
+
+const PENALTY: Record<Severity, number> = { critical: 25, high: 10, medium: 3, low: 1 }
+
+export type Grade = 'A' | 'B' | 'C' | 'D' | 'F'
+
+/** A repository's security score: 100 minus a penalty per finding, and a school grade for it. */
+export const scoreOf = (findings: readonly Pick<Finding, 'severity'>[]): { score: number; grade: Grade } => {
+  const score = Math.max(0, 100 - findings.reduce((sum, f) => sum + PENALTY[f.severity], 0))
+  const grade: Grade = score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'F'
+  return { score, grade }
+}
+
+const GRADE_COLOR: Record<Grade, string> = { A: 'brightgreen', B: 'green', C: 'yellow', D: 'orange', F: 'red' }
+
+/** A README badge for a grade, linking to the guard. */
+export const badgeMarkdown = (grade: Grade) =>
+  `[![shift-left-guard: ${grade}](https://img.shields.io/badge/shift--left--guard-${grade}-${GRADE_COLOR[grade]})](https://github.com/PascalNehlsen/shift-left-guard)`
+
+/** ISO week, `2026-W41`: the key the weekly recap counts under. */
+export const weekOf = (at: number) => {
+  const d = new Date(at)
+  d.setUTCHours(0, 0, 0, 0)
+  const day = (d.getUTCDay() + 6) % 7
+  d.setUTCDate(d.getUTCDate() - day + 3)
+  const jan4 = new Date(Date.UTC(d.getUTCFullYear(), 0, 4))
+  const week = 1 + Math.round(((d.getTime() - jan4.getTime()) / 86_400_000 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7)
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`
+}
+
