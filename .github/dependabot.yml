@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned actions current; Dependabot updates the SHA and the version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # Bumps the pinned Claude Code CLI; CI runs the plugin tests against it.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-name: '@anthropic-ai/claude-code'
+    commit-message:
+      prefix: deps
