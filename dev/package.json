@@ -10,7 +10,7 @@
     "self-scan": "cd .. && node bin/guard-scan.mjs --all --block-at=high"
   },
   "devDependencies": {
-    "@anthropic-ai/claude-code": "2.1.295"
+    "@anthropic-ai/claude-code": "2.1.296"
   },
   "allowScripts": {
     "@anthropic-ai/claude-code": true
